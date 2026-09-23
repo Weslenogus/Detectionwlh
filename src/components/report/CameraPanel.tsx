@@ -1,0 +1,130 @@
+"use client";
+
+import { FLASH_COLORS } from "@/lib/detection/camera/flash";
+import type { CameraSignals, FlashColor, FrameMetric, Report } from "@/lib/detection/types";
+import { LineChart } from "../charts/LineChart";
+import { Card, KV, pct, StatusPill } from "../ui";
+import { CAMERA_LABELS, ProbBars } from "./Probabilities";
+
+const share = (c: Exclude<FlashColor, "white">, m: FrameMetric) => {
+  const sum = Math.max(1, m.r + m.g + m.b);
+  return (c === "red" ? m.r : c === "green" ? m.g : m.b) / sum;
+};
+
+function Tile({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="rounded-xl bg-surface-2 p-3">
+      <div className="text-xs text-muted">{label}</div>
+      <div className="mt-0.5 text-lg font-semibold">{value}</div>
+      {hint && <div className="text-xs text-muted">{hint}</div>}
+    </div>
+  );
+}
+
+export function CameraPanel({ report, camera, snapshot }: { report: Report; camera: CameraSignals | null; snapshot: string | null }) {
+  const f = camera?.front;
+  if (!camera || !f) {
+    return (
+      <Card>
+        <h2 className="font-semibold">Camera</h2>
+        <p className="mt-1 text-sm text-ink-2">{report.camera.headline}. {camera?.error ?? ""}</p>
+      </Card>
+    );
+  }
+  const A = f.aggregate;
+  const fl = f.flash;
+  const t0 = f.metrics[0]?.t ?? 0;
+  const lag = fl?.lagMs ?? 0;
+  const colors = Array.from(new Set((fl?.sequence ?? []).filter((c): c is Exclude<FlashColor, "white"> => c !== "white")));
+
+  return (
+    <Card className="space-y-5">
+      <div className="flex items-start gap-4">
+        {snapshot && (
+          // eslint-disable-next-line @next/next/no-img-element -- local data: URL, never uploaded
+          <img src={snapshot} alt="Camera frame (kept on this device)" className="size-28 shrink-0 rounded-xl object-cover" style={{ transform: "scaleX(-1)" }} />
+        )}
+        <div className="min-w-0 space-y-1.5">
+          <h2 className="font-semibold">Camera forensics</h2>
+          <p className="text-sm text-ink-2">{report.camera.headline}</p>
+          <div className="flex flex-wrap gap-1.5">
+            <StatusPill status={report.camera.cameraClass === "physical" ? "pass" : "fail"}>
+              {pct(report.camera.confidence)} {report.camera.cameraClass ?? "untested"}
+            </StatusPill>
+            {fl && (
+              <StatusPill status={fl.verdict === "responsive" ? "pass" : fl.verdict === "none" ? "warn" : "info"}>liveness {fl.verdict}</StatusPill>
+            )}
+          </div>
+          <p className="text-xs text-muted">The snapshot never leaves this device; only numeric frame statistics are sent for scoring.</p>
+        </div>
+      </div>
+
+      {report.camera.probabilities && <ProbBars title="Camera hypotheses" probs={report.camera.probabilities} labels={CAMERA_LABELS} />}
+
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <Tile label="Frames in 1 s" value={`${f.timing.frames}`} hint={`${f.timing.fps ?? "?"} fps · CV ${f.timing.intervalCv ?? "?"}`} />
+        <Tile label="Temporal noise σ" value={A?.temporalNoise?.toFixed(3) ?? "—"} hint={A?.zeroDiffRatio != null ? `${(A.zeroDiffRatio * 100).toFixed(1)}% unchanged px` : undefined} />
+        <Tile label="Frozen frames" value={A ? `${Math.round(A.duplicateRatio * 100)}%` : "—"} hint={`blockiness ×${A?.blockiness.toFixed(2) ?? "?"}`} />
+        <Tile label="Flash correlation" value={fl?.correlation != null ? fl.correlation.toFixed(2) : "—"} hint={fl?.lagMs != null ? `lag ${fl.lagMs} ms` : undefined} />
+      </div>
+
+      {fl && colors.length > 0 && f.metrics.length > 3 && (
+        <div>
+          <h3 className="text-sm font-semibold">Screen-reflection challenge</h3>
+          <p className="mb-3 text-xs text-muted">
+            Server-issued sequence {fl.sequence.join(" → ")}. Each panel shows that colour&apos;s share of the light reaching the camera; shading marks when the
+            screen showed it (shifted by the {lag} ms display+sensor lag). A live camera rises inside its shaded band.
+          </p>
+          <div className="grid gap-4 sm:grid-cols-3">
+            {colors.map((c) => (
+              <LineChart
+                key={c}
+                title={`${c[0].toUpperCase()}${c.slice(1)} share`}
+                swatch={FLASH_COLORS[c]}
+                subtitle={`shaded: ${c} flash`}
+                height={120}
+                series={[{ id: c, label: `${c} share`, color: "var(--series-1)", points: f.metrics.map((m) => ({ x: m.t - t0, y: share(c, m) * 100 })) }]}
+                bands={fl.schedule.filter((s) => s.color === c).map((s) => ({ from: s.start + lag - t0, to: s.end + lag - t0 }))}
+                xFormat={(x) => `${Math.round(x)} ms`}
+                yFormat={(y) => `${y.toFixed(1)}%`}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {f.metrics.some((m) => m.temporalSigma !== null) && (
+        <LineChart
+          title="Frame-to-frame sensor noise"
+          subtitle="Temporal σ of static pixels (green channel). Zero means bit-identical frames."
+          height={120}
+          series={[
+            {
+              id: "noise",
+              label: "σ",
+              color: "var(--series-1)",
+              points: f.metrics.filter((m) => m.temporalSigma !== null).map((m) => ({ x: m.t - t0, y: m.temporalSigma as number })),
+            },
+          ]}
+          xFormat={(x) => `${Math.round(x)} ms`}
+          yFormat={(y) => y.toFixed(2)}
+        />
+      )}
+
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
+        <KV k="Active camera" v={f.label || "(no label)"} />
+        <KV k="Track type" v={f.trackConstructor} mono />
+        <KV k="Resolution" v={`${f.videoWidth}×${f.videoHeight}`} mono />
+        <KV k="Facing" v={String(f.settings.facingMode ?? "n/a")} />
+        <KV k="Pixel format" v={f.videoFrame?.format ?? "n/a"} mono />
+        <KV k="Colour space" v={f.videoFrame?.colorSpace ? `${f.videoFrame.colorSpace.primaries ?? "?"} / ${f.videoFrame.colorSpace.fullRange ? "full" : "limited"}` : "n/a"} mono />
+        <KV k="Spatial noise σ" v={A?.spatialNoise.toFixed(2) ?? "—"} mono />
+        <KV k="Scene luma" v={A ? `${A.meanLuma.toFixed(0)} ± ${A.lumaStd.toFixed(0)}` : "—"} mono />
+        <KV k="Face frames" v={f.face?.available ? `${f.face.framesWithFace}/${f.face.framesAnalyzed}` : (f.face?.error ?? "n/a")} />
+        <KV k="Cameras enumerated" v={`${camera.devicesAfter.filter((d) => d.kind === "videoinput").length}`} />
+        <KV k="Rear camera" v={camera.rear ? camera.rear.label || "opened" : (camera.rearError ?? "—")} />
+        <KV k="Controls" v={f.capabilities ? Object.keys(f.capabilities).length + " capabilities" : "none"} />
+      </dl>
+    </Card>
+  );
+}
