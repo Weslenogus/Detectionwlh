@@ -57,6 +57,7 @@ export const EMULATOR_MODEL_PATTERNS: [RegExp, string][] = [
   [/\bNox\b|NoxPlayer/i, "NoxPlayer"],
   [/LDPlayer|ldmnq/i, "LDPlayer"],
   [/MEmu|Microvirt/i, "MEmu"],
+  [/\bMuMu\b|NetEase/i, "MuMu Player (NetEase)"],
   [/Emulator|Simulator|Virtual Device/i, "Generic emulator"],
 ];
 

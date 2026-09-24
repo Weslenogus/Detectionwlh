@@ -119,6 +119,9 @@ const CAMERA_HEADLINE: Record<CameraClass, string> = {
   synthetic: "Synthetic / emulated camera feed",
 };
 
+/** Weak emulator indicators; two or more together rule out "approve". */
+const SOFT_EMULATOR_HINTS = new Set(["sensors.motion", "touch.contact", "hardware.video-decoder", "camera.inventory", "camera.rear"]);
+
 /** Failed findings that each rule out "approve" on their own. */
 const APPROVAL_BLOCKERS = new Set(["camera.label-driver", "camera.noise-map", "camera.second-face", "camera.hooked", "camera.depth"]);
 
@@ -212,8 +215,12 @@ export function evaluate(bundle: SignalBundle, opts: EvaluateOptions): Report {
   // Findings that prove the feed is not a plain camera looking at one live person: each one alone
   // rules out an approval, however strong the rest of the evidence.
   const blocking = findings.filter((f) => f.status === "fail" && APPROVAL_BLOCKERS.has(f.id));
+  // Soft emulator hints: each has innocent explanations, two independent ones on a "phone" rarely
+  // do. This is what an ARM virtual machine with a spoofed model and GPU string still shows.
+  const emulatorHints = new Set(findings.filter((f) => SOFT_EMULATOR_HINTS.has(f.id) && (f.status === "warn" || f.status === "fail")).map((f) => f.id));
+  const corroborated = ctx.claims.mobile && emulatorHints.size >= 2;
   let decision: Decision = "review";
-  if (isRealPhone && pPhone >= 0.85 && camOk && depthOk && !extraFace && !blocking.length && !hardFail && !presentationAttack) decision = "approve";
+  if (isRealPhone && pPhone >= 0.85 && camOk && depthOk && !extraFace && !blocking.length && !corroborated && !hardFail && !presentationAttack) decision = "approve";
   else if (hardFail || presentationAttack || pPhone < 0.2) decision = "decline";
 
   const camFactor = camTested ? camProbs!.physical : bundle.camera ? 0.5 : 0.85;

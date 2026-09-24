@@ -144,9 +144,13 @@ FACE_CLIPS=test-results/face-clips npm run test:e2e
 | `obs-relay-id` — renamed OBS relaying a live 3D face + pasted ID | name-vs-driver fail, **composited** noise map, **second still face**, camera `virtual`, declined |
 | `face-mesh-3d` — textured 3D face mesh turning | geometry reads as 3D (never `flat`); still declined as a desktop |
 
+Emulators, including **MuMu Player 12** (Windows, x86) and **MuMu Player Pro** (Apple silicon, ARM), are covered by `src/lib/detection/__tests__/mumu.test.ts`.
+
 The renamed label is applied to the submitted signals before the server scores them — exactly what an OS-level rename delivers, since a device name is just a string the driver reports.
 
 ## Limitations — read before relying on it
+
+**[docs/BYPASS-ANALYSIS.md](docs/BYPASS-ANALYSIS.md)** is the full threat model: every known way around these checks, which ones are measured, MuMu Player results, what is impossible to detect from a browser and what would close each gap. In short:
 
 - **Client signals are attacker-controlled.** The server re-scores raw data and many probes measure hardware behaviour, but an adversary running a modified browser engine on real ARM hardware (or a rooted phone with a camera-injection hook) can still forge values. Treat this as one risk layer alongside document verification, face matching and your own fraud signals.
 - **Calibration.** Weights and thresholds come from documented platform behaviour, synthetic fixtures and MediaPipe recordings of rendered attacks — not yet from a large corpus of real devices and people. Log `/api/analyze` payloads from real traffic and tune `src/lib/detection/engine/rules/` and `camera/liveness3d.ts`.

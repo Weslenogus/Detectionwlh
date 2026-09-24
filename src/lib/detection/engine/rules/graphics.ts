@@ -63,16 +63,26 @@ export function graphicsRules(c: Ctx, add: Add) {
         evidence: claims.mobile ? { phone: 0.4, tablet: 0.4, spoofed: -0.6, desktop: 0.2 } : { desktop: 0.3, tablet: 0.3 },
       }),
     desktop: () =>
-      add({
-        id: "graphics.gpu",
-        title: "GPU renderer",
-        value: gpu.label,
-        detail: claims.mobile
-          ? `Desktop GPU (${gpu.family}) behind a mobile user agent — the page is rendered by a PC.`
-          : `Desktop GPU (${gpu.family}).`,
-        status: claims.mobile ? "fail" : "info",
-        evidence: claims.mobile ? { spoofed: 2.5, emulator: 1.2, phone: -3.0, tablet: -2.5 } : { desktop: 0.8, phone: -1.2, tablet: -0.8 },
-      }),
+      claims.android && gpu.family === "apple-silicon"
+        ? add({
+            id: "graphics.gpu",
+            title: "GPU renderer",
+            value: gpu.label,
+            detail:
+              "An Apple M-series GPU behind an Android user agent. No Android phone has one: this is Android running in a virtual machine on a Mac (MuMu Player Pro, the Android Studio arm64 emulator), where the ARM CPU check can't help.",
+            status: "fail",
+            evidence: { emulator: 5.0, spoofed: 1.0, phone: -4.0, tablet: -3.5 },
+          })
+        : add({
+            id: "graphics.gpu",
+            title: "GPU renderer",
+            value: gpu.label,
+            detail: claims.mobile
+              ? `Desktop GPU (${gpu.family}) behind a mobile user agent — the page is rendered by a PC.`
+              : `Desktop GPU (${gpu.family}).`,
+            status: claims.mobile ? "fail" : "info",
+            evidence: claims.mobile ? { spoofed: 2.5, emulator: 1.2, phone: -3.0, tablet: -2.5 } : { desktop: 0.8, phone: -1.2, tablet: -0.8 },
+          }),
     unknown: () =>
       add({
         id: "graphics.gpu",
