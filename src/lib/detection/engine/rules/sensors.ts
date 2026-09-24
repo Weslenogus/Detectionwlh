@@ -7,7 +7,9 @@ export function sensorRules(c: Ctx, add: Add) {
   const perm = c.bundle.motion?.permission ?? "pending";
   const statsTxt = `${m.samples} samples${m.rateHz ? ` @ ${m.rateHz} Hz` : ""}${m.gravityMagnitude ? ` · |g| ${fmt(m.gravityMagnitude)} m/s²` : ""}${m.noise !== null ? ` · noise ${fmt(m.noise, 4)}` : ""}${m.quantum !== null ? ` · step ${fmt(m.quantum, 4)}` : ""}`;
 
-  switch (m.verdict) {
+  const blockedBySetting = ["accelerometer", "gyroscope"].some((k) => c.d.environment?.permissions?.[k] === "denied");
+  const verdict = m.verdict === "null-sensors" && blockedBySetting ? "denied" : m.verdict;
+  switch (verdict) {
     case "physical":
       add({
         id: "sensors.motion",

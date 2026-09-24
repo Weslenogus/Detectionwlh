@@ -7,6 +7,7 @@ import {
   devtoolsPixel,
   fingerTaps,
   handheldMotion,
+  headTurn,
   honestDesktop,
   mouseClicks,
   nullMotion,
@@ -111,5 +112,40 @@ describe("scoring engine", () => {
     expect(r.flags.length).toBeLessThanOrEqual(6);
     expect(r.riskScore).toBeGreaterThanOrEqual(0);
     expect(r.riskScore).toBeLessThanOrEqual(100);
+  });
+
+  describe("active 3D liveness", () => {
+    const withTurn = (turn: ReturnType<typeof headTurn> | null, requireDepth?: boolean) => {
+      const camera = physicalCamera("android");
+      camera.active3d = turn;
+      return evaluate(bundle(realPixel(), { motion: handheldMotion(3, 11, true), interaction: fingerTaps(), camera }), {
+        source: "server",
+        now: 0,
+        id: "rep_test",
+        requireCamera: true,
+        requireDepth,
+      });
+    };
+
+    it("approves a live 3D head turn in the issued order", () => {
+      const r = withTurn(headTurn("live", ["right", "left"]), true);
+      expect(r.camera.depth?.verdict).toBe("live-3d");
+      expect(r.camera.headline).toContain("3D face confirmed");
+      expect(r.decision).toBe("approve");
+    });
+
+    it("declines a flat face (photo / screen) even on a genuine phone and camera", () => {
+      const r = withTurn(headTurn("flat"), true);
+      expect(r.camera.depth?.verdict).toBe("flat");
+      expect(r.decision).toBe("decline");
+      expect(r.flags[0]).toMatch(/3D head-turn/);
+    });
+
+    it("sends wrong order, timeouts, a stripped challenge and an orbiting phone to review", () => {
+      expect(withTurn({ ...headTurn("live", ["left", "right"]), challenge: ["right", "left"] }, true).decision).toBe("review");
+      expect(withTurn(headTurn("still"), true).decision).toBe("review");
+      expect(withTurn(null, true).decision).toBe("review");
+      expect(withTurn(headTurn("live", ["left", "right"], { phoneRotationDeg: 40 }), true).decision).toBe("review");
+    });
   });
 });

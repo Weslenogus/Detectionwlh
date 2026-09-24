@@ -120,6 +120,113 @@ export function centreRGB(thumb: Uint8ClampedArray, w: number, h: number): [numb
   return n ? [r / n, g / n, b / n] : [0, 0, 0];
 }
 
+/* ------------------------- Moiré / screen recapture ------------------------ */
+
+/** In-place iterative radix-2 complex FFT. */
+export function fft(re: Float64Array, im: Float64Array): void {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len;
+    const wr = Math.cos(ang);
+    const wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1;
+      let ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const a = i + k;
+        const b = a + len / 2;
+        const xr = re[b] * cr - im[b] * ci;
+        const xi = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - xr;
+        im[b] = im[a] - xi;
+        re[a] += xr;
+        im[a] += xi;
+        const t = cr * wr - ci * wi;
+        ci = cr * wi + ci * wr;
+        cr = t;
+      }
+    }
+  }
+}
+
+/**
+ * Re-filming a screen aliases its pixel grid against the camera sensor and
+ * produces moiré: sharp, isolated peaks in the 2-D spectrum at mid/high
+ * frequencies. Natural scenes have a smooth ~1/f spectrum. Returns the ratio of
+ * the strongest mid-band peak to the median magnitude at the same radius.
+ */
+export function moireScore(y: Float32Array, w: number, h: number): { peakRatio: number; frequency: number } {
+  const N = [256, 128, 64, 32].find((s) => s <= w && s <= h) ?? 0;
+  if (N < 32) return { peakRatio: 1, frequency: 0 };
+  const re = new Float64Array(N * N);
+  const im = new Float64Array(N * N);
+  let m = 0;
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) m += y[r * w + c];
+  m /= N * N;
+  for (let r = 0; r < N; r++) {
+    const wy = 0.5 - 0.5 * Math.cos((2 * Math.PI * r) / (N - 1));
+    for (let c = 0; c < N; c++) {
+      const wx = 0.5 - 0.5 * Math.cos((2 * Math.PI * c) / (N - 1));
+      re[r * N + c] = (y[r * w + c] - m) * wx * wy;
+    }
+  }
+  const rowRe = new Float64Array(N);
+  const rowIm = new Float64Array(N);
+  for (let r = 0; r < N; r++) {
+    rowRe.set(re.subarray(r * N, r * N + N));
+    rowIm.set(im.subarray(r * N, r * N + N));
+    fft(rowRe, rowIm);
+    re.set(rowRe, r * N);
+    im.set(rowIm, r * N);
+  }
+  for (let c = 0; c < N; c++) {
+    for (let r = 0; r < N; r++) {
+      rowRe[r] = re[r * N + c];
+      rowIm[r] = im[r * N + c];
+    }
+    fft(rowRe, rowIm);
+    for (let r = 0; r < N; r++) {
+      re[r * N + c] = rowRe[r];
+      im[r * N + c] = rowIm[r];
+    }
+  }
+  // Radial bins of magnitude over the mid band (0.12–0.45 cycles/pixel).
+  const bins = new Map<number, number[]>();
+  const cells: { bin: number; mag: number; f: number }[] = [];
+  for (let v = 0; v < N; v++) {
+    const fv = (v < N / 2 ? v : v - N) / N;
+    for (let u = 0; u < N / 2; u++) {
+      const fu = u / N;
+      const f = Math.hypot(fu, fv);
+      if (f < 0.12 || f > 0.45) continue;
+      const mag = Math.hypot(re[v * N + u], im[v * N + u]);
+      const bin = Math.round(f * 100);
+      if (!bins.has(bin)) bins.set(bin, []);
+      bins.get(bin)!.push(mag);
+      cells.push({ bin, mag, f });
+    }
+  }
+  const medians = new Map<number, number>();
+  for (const [b, v] of bins) medians.set(b, median(v));
+  let best = { peakRatio: 1, frequency: 0 };
+  for (const c of cells) {
+    const r = c.mag / Math.max(1e-6, medians.get(c.bin) ?? 1);
+    if (r > best.peakRatio) best = { peakRatio: r, frequency: c.f };
+  }
+  return { peakRatio: Math.round(best.peakRatio * 100) / 100, frequency: Math.round(best.frequency * 1000) / 1000 };
+}
+
+export const MOIRE_THRESHOLD = 18;
+
 interface PairStats {
   diff: number;
   zero: number;
@@ -171,6 +278,7 @@ export function analyzeFrames(frames: RawFrame[]): { metrics: FrameMetric[]; agg
   let duplicates = 0;
   let pairs = 0;
   const blocks: number[] = [];
+  const moire: { peakRatio: number; frequency: number }[] = [];
   let lastY: Float32Array | null = null;
 
   frames.forEach((f, idx) => {
@@ -198,6 +306,7 @@ export function analyzeFrames(frames: RawFrame[]): { metrics: FrameMetric[]; agg
       });
     }
     if (idx % 3 === 0) blocks.push(blockiness(y, f.cw, f.ch));
+    if (idx % 6 === 0 && moire.length < 4) moire.push(moireScore(y, f.cw, f.ch));
     metrics.push({
       t: Math.round(f.t * 10) / 10,
       meanY: Math.round(m * 100) / 100,
@@ -243,6 +352,13 @@ export function analyzeFrames(frames: RawFrame[]): { metrics: FrameMetric[]; agg
             )
           : null,
       noiseByIntensity,
+      moire: moire.length
+        ? (() => {
+            const ratio = median(moire.map((m) => m.peakRatio));
+            const top = moire.reduce((a, b) => (b.peakRatio > a.peakRatio ? b : a));
+            return { peakRatio: Math.round(ratio * 100) / 100, frequency: top.frequency, suspicious: ratio >= MOIRE_THRESHOLD };
+          })()
+        : null,
     },
   };
 }

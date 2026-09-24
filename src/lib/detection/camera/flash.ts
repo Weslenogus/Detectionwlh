@@ -50,12 +50,18 @@ function colorAt(schedule: FlashSegment[], t: number): FlashColor | null {
   return null;
 }
 
-export function analyzeFlash(metrics: FrameMetric[], sequence: FlashColor[], schedule: FlashSegment[], dark = false): FlashResponse {
-  const base: FlashResponse = { sequence, schedule, correlation: null, lagMs: null, amplitude: null, perChannel: {}, verdict: "inconclusive" };
-  if (!schedule.length || metrics.length < 8 || dark) return base;
+interface Fit {
+  corr: number;
+  lag: number;
+  amp: number;
+  per: Record<string, number>;
+}
+
+/** Best lag-searched mean per-channel correlation between frame chromaticity and a colour schedule. */
+function bestFit(metrics: FrameMetric[], schedule: FlashSegment[], lagMin = 0, lagMax = 320): Fit | null {
   const colors = Array.from(new Set(schedule.map((s) => s.color))).filter((c): c is Exclude<FlashColor, "white"> => c !== "white");
-  let best = { corr: -Infinity, lag: 0, amp: 0, per: {} as Record<string, number> };
-  for (let lag = 0; lag <= 320; lag += 16) {
+  let best: Fit | null = null;
+  for (let lag = Math.max(0, lagMin); lag <= lagMax; lag += 16) {
     const rows = metrics
       .map((m) => ({ m, c: colorAt(schedule, m.t - lag) }))
       .filter((r): r is { m: FrameMetric; c: FlashColor } => r.c !== null);
@@ -76,12 +82,54 @@ export function analyzeFlash(metrics: FrameMetric[], sequence: FlashColor[], sch
     const vals = Object.values(per);
     if (!vals.length) continue;
     const corr = mean(vals);
-    if (corr > best.corr) best = { corr, lag, amp: mean(amps), per };
+    if (!best || corr > best.corr) best = { corr, lag, amp: mean(amps), per };
   }
-  if (!Number.isFinite(best.corr)) return base;
-  const correlation = Math.round(best.corr * 1000) / 1000;
-  const amplitude = Math.round(best.amp * 10000) / 10000;
+  return best;
+}
+
+/** Colour assignments of the same timing that differ from the real one in at least half the segments. */
+function alternatives(real: FlashColor[]): FlashColor[][] {
+  const out: FlashColor[][] = [];
+  const n = Math.min(real.length, 6);
+  const total = FLASH_PALETTE.length ** n;
+  for (let k = 0; k < total; k++) {
+    const seq: FlashColor[] = [];
+    let x = k;
+    for (let i = 0; i < n; i++) {
+      seq.push(FLASH_PALETTE[x % FLASH_PALETTE.length]);
+      x = Math.floor(x / FLASH_PALETTE.length);
+    }
+    if (seq.filter((c, i) => c !== real[i]).length >= Math.ceil(n / 2)) out.push(seq);
+  }
+  return out;
+}
+
+/**
+ * A live reflection follows *the* sequence the server chose. Colour drift in a
+ * replayed or generated feed can correlate with it by chance, but then it
+ * correlates just as well with other colour assignments — so the true
+ * sequence must beat every alternative by a margin (a permutation test).
+ */
+export function analyzeFlash(metrics: FrameMetric[], sequence: FlashColor[], schedule: FlashSegment[], dark = false): FlashResponse {
+  const base: FlashResponse = { sequence, schedule, correlation: null, lagMs: null, amplitude: null, perChannel: {}, specificity: null, verdict: "inconclusive" };
+  if (!schedule.length || metrics.length < 8 || dark) return base;
+  const fit = bestFit(metrics, schedule);
+  if (!fit) return base;
+  // Rivals are scored at the same display→sensor latency (a property of the device, not of the
+  // colour order); otherwise a sequence shifted by one segment could borrow a longer lag.
+  let rival = -1;
+  for (const alt of alternatives(schedule.map((s) => s.color))) {
+    const f = bestFit(metrics, schedule.map((s, i) => ({ ...s, color: alt[i] ?? s.color })), fit.lag - 48, fit.lag + 48);
+    if (f && f.corr > rival) rival = f.corr;
+  }
+  const correlation = Math.round(fit.corr * 1000) / 1000;
+  const amplitude = Math.round(fit.amp * 10000) / 10000;
+  const specificity = Math.round((fit.corr - rival) * 1000) / 1000;
   const verdict: FlashResponse["verdict"] =
-    correlation >= 0.55 && amplitude >= 0.003 ? "responsive" : correlation >= 0.3 && amplitude >= 0.0015 ? "weak" : "none";
-  return { ...base, correlation, lagMs: best.lag, amplitude, perChannel: best.per, verdict };
+    correlation >= 0.55 && amplitude >= 0.003 && specificity >= 0.2
+      ? "responsive"
+      : correlation >= 0.3 && amplitude >= 0.0015 && specificity > 0
+        ? "weak"
+        : "none";
+  return { ...base, correlation, lagMs: fit.lag, amplitude, perChannel: fit.per, specificity, verdict };
 }

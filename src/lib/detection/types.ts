@@ -4,6 +4,7 @@
  * same payload can be scored in the browser (preliminary verdict) and again on
  * the server (authoritative, signed verdict).
  */
+import type { Active3DAnalysis, Active3DSignals } from "./camera/liveness3d";
 
 /* ------------------------------------------------------------------------ */
 /* Classification targets                                                    */
@@ -117,6 +118,8 @@ export interface ScreenSignals {
   safeArea: { top: number; right: number; bottom: number; left: number };
   media: Record<string, boolean>;
   refreshRate: number | null;
+  /** screen.isExtended — true when a desktop has more than one monitor attached. */
+  isExtended?: boolean | null;
 }
 
 export interface TouchSignals {
@@ -226,6 +229,10 @@ export interface IntegritySignals {
   screenOwnKeys: string[];
   iframe: CrossRealmSignals;
   worker: CrossRealmSignals;
+  /** Opaque-origin sandboxed iframe (extensions frequently skip these). */
+  sandbox?: CrossRealmSignals;
+  /** Service-worker realm (separate process context most spoofers never reach). */
+  serviceWorker?: CrossRealmSignals;
   canvasStable: boolean | null;
   canvasPixelExact: boolean | null;
   audioStable: boolean | null;
@@ -293,6 +300,61 @@ export interface EnvironmentSignals {
   mediaDevicesPre: { videoinput: number; audioinput: number; audiooutput: number; labelsVisible: boolean } | null;
   webview: { androidWebView: boolean; iosWebView: boolean; inApp: string | null };
   hevcDecode: boolean | null;
+}
+
+/** Which OS the text stack really belongs to, measured from glyph metrics. */
+export interface HostOsSignals {
+  /** Font family that CSS `system-ui` resolves to (Segoe UI ⇒ Windows, Roboto ⇒ Android, SF ⇒ Apple…). */
+  systemUiFont: string | null;
+  appleSystemFont: boolean | null;
+  /** Windows cannot render regional-indicator flags and prints letters instead. */
+  flagEmojiAsLetters: boolean | null;
+  /** Coloured sub-pixel (ClearType/LCD) antialiasing on opaque canvases — desktop only. */
+  subpixelText: boolean | null;
+}
+
+export interface TimezoneSignals {
+  zone: string;
+  intlOffset: number | null;
+  dateOffset: number;
+  consistent: boolean | null;
+  numberLocale: string;
+  dateLocale: string;
+}
+
+export interface MediaCapsSignals {
+  supported: boolean;
+  decode: Record<string, { supported: boolean; smooth: boolean; powerEfficient: boolean } | null>;
+  rtcVideoCodecs: string[];
+}
+
+export interface WebRtcSignals {
+  supported: boolean;
+  error?: string;
+  durationMs: number;
+  candidateTypes: string[];
+  /** Public addresses seen by a STUN server over UDP (compared with the HTTP address server-side). */
+  srflxIps: string[];
+  hostCandidates: number;
+  mdnsHost: boolean;
+}
+
+export interface PrivacySignals {
+  incognito: boolean | null;
+  browser: string | null;
+  error?: string;
+}
+
+export interface BotdSignals {
+  bot: boolean | null;
+  kind: string | null;
+  error?: string;
+}
+
+export interface FpjsSignals {
+  visitorId: string | null;
+  confidence: number | null;
+  error?: string;
 }
 
 /** Platform-exclusive API presence map (name → exposed?). */
@@ -371,6 +433,22 @@ export interface ClickRecord {
   holdMs: number | null;
 }
 
+export interface BehaviorSignals {
+  navigationType: string | null;
+  pageAgeMs: number;
+  hiddenCount: number;
+  hiddenMs: number;
+  blurCount: number;
+  pastes: number;
+  copies: number;
+  resizes: number;
+  orientationChanges: number;
+  /** performance.now() marks set by the flow (e.g. when a Continue button became tappable). */
+  marks: Record<string, number>;
+  /** Visibility transitions while the camera was recording. */
+  hiddenDuringCamera: boolean;
+}
+
 export interface InteractionSignals {
   pointers: PointerRecord[];
   touches: TouchRecord[];
@@ -382,6 +460,22 @@ export interface InteractionSignals {
     wheel: number;
     keys: number;
   };
+  behavior?: BehaviorSignals;
+}
+
+export interface LocationSignals {
+  state: "granted" | "denied" | "unavailable" | "timeout" | "error" | "skipped";
+  error?: string;
+  accuracy?: number | null;
+  altitude?: number | null;
+  altitudeAccuracy?: number | null;
+  heading?: number | null;
+  speed?: number | null;
+  /** Rounded to 0.01° (~1 km) — enough to compare with IP geolocation. */
+  lat?: number | null;
+  lon?: number | null;
+  fixAgeMs?: number | null;
+  latencyMs?: number | null;
 }
 
 /* ------------------------------- Camera -------------------------------- */
@@ -424,6 +518,8 @@ export interface FrameAggregate {
   uniform: boolean;
   noiseIntensityCorr: number | null;
   noiseByIntensity: { intensity: number; sigma: number }[];
+  /** Spectral peakiness of the luma crop: strong periodic peaks = moiré from re-filming a screen. */
+  moire?: { peakRatio: number; frequency: number; suspicious: boolean } | null;
 }
 
 export interface FlashSegment {
@@ -441,18 +537,31 @@ export interface FlashResponse {
   lagMs: number | null;
   amplitude: number | null;
   perChannel: Record<string, number>;
+  /** Margin of the true sequence's correlation over the best of all other colour assignments (permutation test). */
+  specificity?: number | null;
   verdict: "responsive" | "weak" | "none" | "inconclusive";
 }
 
 export interface FaceSignals {
   available: boolean;
   error?: string;
+  model?: "landmarker" | "detector";
   framesAnalyzed: number;
   framesWithFace: number;
   maxFaces: number;
   meanScore: number | null;
   boxes: { frame: number; x: number; y: number; w: number; h: number; score: number }[];
   movement: number | null;
+  /** Head pose in degrees (median over frames) and its spread. */
+  pose?: { yaw: number; pitch: number; roll: number; yawSpread: number; pitchSpread: number } | null;
+  /** Median / max blink blend-shape score (0 = open, 1 = closed). */
+  eyeBlink?: { median: number; max: number } | null;
+  /** Normalised landmark micro-motion between frames, face-size relative. */
+  landmarkMotion?: number | null;
+  /** Non-rigid motion: landmark motion left after removing the global face translation/scale. */
+  nonRigidMotion?: number | null;
+  faceArea?: number | null;
+  centered?: boolean | null;
 }
 
 export interface CameraCapture {
@@ -501,6 +610,8 @@ export interface CameraSignals {
   rear: CameraCapture | null;
   rearError?: string;
   challengeSequence: FlashColor[];
+  /** Active 3D liveness: server-issued head-turn challenge tracked live. */
+  active3d?: Active3DSignals | null;
 }
 
 /* ---------------------------- Full payload ----------------------------- */
@@ -520,8 +631,44 @@ export interface DeviceSignals {
   automation: AutomationSignals;
   fingerprint: FingerprintSignals;
   environment: EnvironmentSignals;
+  hostOs?: HostOsSignals;
+  timezone?: TimezoneSignals;
+  mediaCaps?: MediaCapsSignals;
+  webrtc?: WebRtcSignals;
+  privacy?: PrivacySignals;
+  botd?: BotdSignals;
+  fpjs?: FpjsSignals;
   errors: Record<string, string>;
   timings: Record<string, number>;
+}
+
+export interface IpIntel {
+  provider: string;
+  source: "api" | "heuristic";
+  asn: string | null;
+  org: string | null;
+  country: string | null;
+  city: string | null;
+  lat: number | null;
+  lon: number | null;
+  timezone: string | null;
+  isMobile: boolean | null;
+  isDatacenter: boolean | null;
+  isVpn: boolean | null;
+  isProxy: boolean | null;
+  isTor: boolean | null;
+  isAbuser: boolean | null;
+  error?: string;
+}
+
+export interface VelocitySignals {
+  windowMinutes: number;
+  sessionsFromIp: number;
+  sessionsFromFingerprint: number;
+  /** Distinct user agents presented by the same browser storage (persistent device id) in 24 h. */
+  identitiesOnDevice: number;
+  /** Distinct user agents presented by the same FingerprintJS visitor in 24 h. */
+  identitiesOnFingerprint: number;
 }
 
 export interface ServerSignals {
@@ -530,16 +677,29 @@ export interface ServerSignals {
   privateIp: boolean;
   headers: Record<string, string>;
   headerOrder: string[];
-  geo: { country?: string; region?: string; city?: string; timezone?: string } | null;
+  geo: { country?: string; region?: string; city?: string; timezone?: string; lat?: number; lon?: number } | null;
   tls: { ja4?: string; ja3?: string } | null;
   receivedAt: number;
+  ipIntel?: IpIntel | null;
+  velocity?: VelocitySignals | null;
+  clockSkewMs?: number | null;
+}
+
+export interface ClientContext {
+  /** Random id persisted in localStorage (Persona-style device link). */
+  storageId: string | null;
+  runs: number;
+  firstSeenAt: number | null;
+  sentAt: number;
 }
 
 export interface SignalBundle {
+  client?: ClientContext | null;
   device: DeviceSignals;
   motion: MotionSignals | null;
   interaction: InteractionSignals | null;
   camera: CameraSignals | null;
+  location?: LocationSignals | null;
   server?: ServerSignals | null;
 }
 
@@ -558,6 +718,8 @@ export type CategoryId =
   | "automation"
   | "environment"
   | "camera"
+  | "network"
+  | "behavior"
   | "server";
 
 export interface Finding {
@@ -624,6 +786,8 @@ export interface Report {
     probabilities: Record<CameraClass, number> | null;
     headline: string;
     liveness: FlashResponse["verdict"] | null;
+    /** Active 3D head-turn result (recomputed server-side). */
+    depth: Active3DAnalysis | null;
   };
   profile: DeviceProfile;
   categories: CategorySummary[];

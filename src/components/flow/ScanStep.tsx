@@ -1,37 +1,43 @@
 "use client";
 
-import { ArrowRight, Camera, LoaderCircle, Radar, Smartphone } from "lucide-react";
+import { ArrowRightIcon, ScanSmileyIcon } from "@phosphor-icons/react";
+import { motion } from "motion/react";
 import { SCAN_STEPS, type ScanStepId, type StepStatus } from "@/lib/detection/collect";
 import { deviceName } from "@/lib/detection/engine/profile";
 import type { Report } from "@/lib/detection/types";
 import { Button, Card, cx, KV, pct, StatusIcon } from "../ui";
+import { ProbeTile, ScanHero, ScanProgress } from "./ScanVisuals";
 import { VerdictGlyph } from "./VerdictGlyph";
 
 export type StepState = Record<ScanStepId, { status: StepStatus; detail?: string }>;
 
 export function ScanChecklist({ steps }: { steps: StepState }) {
   return (
-    <ol className="space-y-1">
-      {SCAN_STEPS.map((s) => {
+    <ol className="space-y-0.5">
+      {SCAN_STEPS.map((s, i) => {
         const st = steps[s.id];
         return (
-          <li key={s.id} className="flex items-start gap-3 rounded-lg px-2 py-1.5">
-            <span className="mt-0.5 flex size-5 items-center justify-center">
-              {st.status === "running" ? (
-                <LoaderCircle className="size-4 animate-spin text-accent" aria-label="Running" />
-              ) : st.status === "done" ? (
-                <StatusIcon status="pass" />
-              ) : st.status === "error" ? (
-                <StatusIcon status="warn" />
-              ) : (
-                <span className="size-2 rounded-full bg-line" aria-label="Pending" />
-              )}
-            </span>
+          <motion.li
+            key={s.id}
+            className={cx("flex items-center gap-3 rounded-xl px-2 py-2 transition-colors", st.status === "running" && "bg-info-wash")}
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: i * 0.03, duration: 0.25 }}
+          >
+            <ProbeTile id={s.id} status={st.status} />
             <span className="min-w-0 flex-1">
-              <span className={cx("block text-sm", st.status === "pending" ? "text-muted" : "text-ink")}>{s.label}</span>
-              <span className="block truncate font-mono text-xs text-muted">{st.detail ?? s.hint}</span>
+              <span className={cx("block text-sm font-medium", st.status === "pending" ? "text-muted" : "text-ink")}>{s.label}</span>
+              <motion.span
+                key={st.detail ?? s.hint}
+                className="block truncate font-mono text-xs text-muted"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.2 }}
+              >
+                {st.detail ?? s.hint}
+              </motion.span>
             </span>
-          </li>
+          </motion.li>
         );
       })}
     </ol>
@@ -40,6 +46,7 @@ export function ScanChecklist({ steps }: { steps: StepState }) {
 
 export function ScanStep({ steps, prelim, onContinue }: { steps: StepState; prelim: Report | null; onContinue: () => void }) {
   const done = SCAN_STEPS.filter((s) => steps[s.id].status === "done" || steps[s.id].status === "error").length;
+  const progress = done / SCAN_STEPS.length;
   const topIssues = prelim
     ? prelim.categories
         .flatMap((c) => c.findings)
@@ -51,21 +58,24 @@ export function ScanStep({ steps, prelim, onContinue }: { steps: StepState; prel
 
   return (
     <div className="space-y-4">
-      <header className="flex items-center gap-3">
-        <div className="relative flex size-12 items-center justify-center rounded-2xl bg-info-wash text-accent">
-          {prelim ? <Smartphone className="size-6" /> : <Radar className="size-6 animate-sweep" />}
-          {!prelim && <span className="absolute inset-0 rounded-2xl border-2 border-accent animate-pulse-ring" aria-hidden />}
-        </div>
-        <div>
+      <header className="flex items-center gap-4">
+        <ScanHero progress={progress} done={Boolean(prelim)} />
+        <div className="min-w-0 flex-1">
           <p className="text-xs font-medium uppercase tracking-wide text-muted">Step 1 of 2</p>
           <h1 className="text-xl font-semibold">{prelim ? "Device analysed" : "Analysing your device…"}</h1>
+          {!prelim && (
+            <div className="mt-2 flex items-center gap-2">
+              <ScanProgress value={progress} />
+              <span className="shrink-0 text-xs text-muted tabular">{Math.round(progress * 100)}%</span>
+            </div>
+          )}
         </div>
       </header>
 
       {!prelim && (
         <Card>
-          <div className="mb-3 flex items-center justify-between text-xs text-muted">
-            <span>Hardware &amp; integrity probes</span>
+          <div className="mb-2 flex items-center justify-between px-2 text-xs text-muted">
+            <span>Hardware, integrity &amp; network probes</span>
             <span className="tabular">
               {done}/{SCAN_STEPS.length}
             </span>
@@ -119,7 +129,7 @@ export function ScanStep({ steps, prelim, onContinue }: { steps: StepState; prel
 
           <Card className="bg-surface-2">
             <div className="flex gap-3">
-              <Camera className="mt-0.5 size-5 shrink-0 text-accent" />
+              <ScanSmileyIcon weight="duotone" className="mt-0.5 size-6 shrink-0 text-accent" aria-hidden />
               <p className="text-sm text-ink-2">
                 Next, a <strong className="text-ink">1-second camera test</strong>. Hold your phone at face height and look at the screen — it will flash a few
                 colours while the camera checks that it is a real sensor. {prelim && "Motion access may be requested on iPhone."}
@@ -128,7 +138,7 @@ export function ScanStep({ steps, prelim, onContinue }: { steps: StepState; prel
           </Card>
 
           <Button data-track="continue-device" onClick={onContinue}>
-            Continue <ArrowRight className="size-5" />
+            Continue <ArrowRightIcon weight="bold" className="size-5" aria-hidden />
           </Button>
         </>
       )}

@@ -16,8 +16,13 @@
     "test:e2e": "node e2e/run.mjs"
   },
   "dependencies": {
+    "@fingerprintjs/botd": "^2.0.0",
+    "@fingerprintjs/fingerprintjs": "^3.4.2",
     "@mediapipe/tasks-vision": "^1.0.1",
+    "@phosphor-icons/react": "^2.1.10",
+    "detectincognitojs": "^1.9.0",
     "lucide-react": "^1.47.0",
+    "motion": "^13.4.2",
     "next": "16.3.6",
     "react": "19.2.8",
     "react-dom": "19.2.8",

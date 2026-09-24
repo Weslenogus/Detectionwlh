@@ -4,6 +4,7 @@
  * that platform genuinely changes.
  */
 import { analyzeFlash } from "../camera/flash";
+import { frameGeometry, KEY_LANDMARKS, type Active3DSignals, type PoseDir } from "../camera/liveness3d";
 import type {
   CameraCapture,
   CameraSignals,
@@ -239,6 +240,9 @@ export function realIPhone(): DeviceSignals {
       windowControlsOverlay: false,
     },
     automation: { chromeObject: false },
+    hostOs: { systemUiFont: "Apple system font (SF)", appleSystemFont: true, flagEmojiAsLetters: false, subpixelText: false },
+    timezone: { zone: "America/Toronto", intlOffset: 240, dateOffset: 240, consistent: true, numberLocale: "en-US", dateLocale: "en-US" },
+    mediaCaps: { supported: true, decode: { "h264-1080p": { supported: true, smooth: true, powerEfficient: true } }, rtcVideoCodecs: ["H264", "VP8", "VP9", "H265"] },
     fingerprint: {
       fonts: ["Helvetica Neue", "Avenir", "Menlo", "PingFang SC", "Futura", "Arial"],
       voices: { count: 60, names: ["Samantha"], localMicrosoft: 0, google: 0, apple: 60, defaultVoice: "Samantha" },
@@ -294,7 +298,10 @@ export function realPixel(): DeviceSignals {
     },
     webgpu: { supported: true, adapter: { vendor: "arm", architecture: "valhall", device: "", description: "", isFallbackAdapter: false, features: [], limits: {} } },
     cpu: { nanArchJs: "arm", nanBitsJs: "7fc00000", nanArchWasm: "arm", nanBitsWasm: "7fc00000" },
-    platformApis: { ...ANDROID_ONLY, ...Object.fromEntries(Object.keys(DESKTOP_ONLY).map((k) => [k, false])) },
+    platformApis: { ...ANDROID_ONLY, ...Object.fromEntries(Object.keys(DESKTOP_ONLY).map((k) => [k, false])), keyboardMap: true, showOpenFilePicker: true },
+    hostOs: { systemUiFont: "Roboto", appleSystemFont: false, flagEmojiAsLetters: false, subpixelText: false },
+    timezone: { zone: "America/Toronto", intlOffset: 240, dateOffset: 240, consistent: true, numberLocale: "en-US", dateLocale: "en-US" },
+    mediaCaps: { supported: true, decode: { "h264-1080p": { supported: true, smooth: true, powerEfficient: true } }, rtcVideoCodecs: ["VP8", "VP9", "H264", "AV1"] },
     fingerprint: {
       fonts: ["Roboto", "Noto Color Emoji", "Cutive Mono", "Coming Soon", "Dancing Script"],
       voices: { count: 40, names: ["English United States"], localMicrosoft: 0, google: 0, apple: 0, defaultVoice: null },
@@ -328,6 +335,7 @@ export function devtoolsPixel(): DeviceSignals {
       media: { pointerCoarse: true, hoverNone: true, anyPointerFine: false, anyHoverHover: false, portrait: true },
     },
     touch: { maxTouchPoints: 1, ontouchstart: true, touchEvent: true },
+    hostOs: { systemUiFont: "Segoe UI", appleSystemFont: false, flagEmojiAsLetters: true, subpixelText: true },
   });
 }
 
@@ -570,4 +578,94 @@ export function obsCamera(): CameraSignals {
 
 export function bundle(device: DeviceSignals, extra: Partial<SignalBundle> = {}): SignalBundle {
   return { device, motion: null, interaction: null, camera: null, ...extra };
+}
+
+/* ------------------------------ 3D head turn ------------------------------ */
+
+type P3 = { x: number; y: number; z: number };
+
+/** MediaPipe FaceMesh face-oval landmark ids. */
+const FACE_OVAL = new Set([10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]);
+
+/**
+ * Synthetic head in face-width units (+z towards the camera): anatomical anchors
+ * for the landmarks the geometry uses, the rest scattered over a curved face
+ * surface. flat = the same face printed on a card.
+ */
+export function syntheticHead(flat: boolean, seed = 1): P3[] {
+  const r = rng(seed);
+  const anchors: Record<number, P3> = {
+    1: { x: 0, y: 0.05, z: 0.45 }, // nose tip
+    2: { x: 0, y: 0.15, z: 0.35 }, // nose base
+    10: { x: 0, y: -0.55, z: 0.2 }, // forehead top
+    152: { x: 0, y: 0.6, z: 0.2 }, // chin
+    234: { x: -0.5, y: 0, z: -0.05 }, // contour, subject's right
+    454: { x: 0.5, y: 0, z: -0.05 }, // contour, subject's left
+  };
+  return KEY_LANDMARKS.map((id) => {
+    let p = anchors[id];
+    if (!p && FACE_OVAL.has(id)) {
+      // Face outline: the sides sit far behind the nose, forehead and chin less so.
+      const th = r() * 2 * Math.PI;
+      p = { x: 0.5 * Math.cos(th), y: 0.6 * Math.sin(th), z: -0.05 + 0.25 * Math.abs(Math.sin(th)) };
+    }
+    if (!p) {
+      const x = (r() - 0.5) * 0.7;
+      const y = (r() - 0.5) * 0.9;
+      p = { x, y, z: 0.35 * Math.sqrt(Math.max(0, 1 - (x / 0.45) ** 2)) };
+    }
+    return flat ? { ...p, z: 0 } : p;
+  });
+}
+
+/** Rotate about the vertical axis (+yaw = towards the user's left) and project with a pinhole camera 3 face-widths away. */
+export function headView(pts: P3[], yawDeg: number) {
+  const a = (yawDeg * Math.PI) / 180;
+  return pts.map((p) => {
+    const x = p.x * Math.cos(a) + p.z * Math.sin(a);
+    const z = -p.x * Math.sin(a) + p.z * Math.cos(a);
+    const d = 3 - z;
+    return { x: 0.5 + (0.35 * x) / d, y: 0.5 + (0.35 * p.y) / d };
+  });
+}
+
+export const flattenPts = (pts: { x: number; y: number }[]) => pts.flatMap((p) => [p.x, p.y]);
+
+/**
+ * Recorded head-turn challenge. "live": a real head turning in the given order;
+ * "flat": a photo tilted back and forth; "still": a photo held still (or a user who never turned).
+ */
+export function headTurn(kind: "live" | "flat" | "still", order: PoseDir[] = ["left", "right"], opts: { phoneRotationDeg?: number } = {}): Active3DSignals {
+  const h = syntheticHead(kind === "flat", 3);
+  const sign = order[0] === "left" ? 1 : -1;
+  // Yaw (live) or card tilt (flat) per frame, degrees.
+  const angles =
+    kind === "live"
+      ? [0, 6, 16, 24, 9, -9, -22, -6].map((v) => v * sign)
+      : kind === "flat"
+        ? [0, 0, 10, 20, 32, 20, 0, -10, -25, -32, 0, 0]
+        : [0, 1, -1, 2, 0, 1, -2, 1];
+  const start = 10_000;
+  const views = angles.map((deg) => headView(h, deg));
+  const geo = views.map((v) => frameGeometry(v)!);
+  const rot = opts.phoneRotationDeg ?? 3;
+  // Gyroscope at 60 Hz: the phone swings `rot` degrees about its vertical axis and back.
+  const gyro = Array.from({ length: 150 }, (_, i) => {
+    const t = start + i * 16.7;
+    const rate = (rot * Math.PI * Math.cos((2 * Math.PI * i) / 150)) / 2.5; // ∫ over one period → ±rot/2 excursion
+    return [t, 0, 0, Math.round(rate * 10000) / 10000];
+  });
+  const extreme = (pick: (a: number, b: number) => boolean) => views[angles.reduce((best, a, i) => (pick(a, angles[best]) ? i : best), 0)];
+  return {
+    status: kind === "live" ? "completed" : "timeout",
+    frameAspect: 1,
+    challenge: order,
+    achieved: kind === "live" ? [...order] : [],
+    window: { start, end: start + 2500 },
+    frames: 75,
+    track: geo.map((g, i) => ({ t: start + i * 300, nose: Math.round(g.nose * 10000) / 10000, yaw: angles[i], faceW: g.width, faceH: g.height, faces: 1 })),
+    keyFrames: { frontal: flattenPts(views[0]), left: flattenPts(extreme((a, b) => a > b)), right: flattenPts(extreme((a, b) => a < b)) },
+    samples: views.map(flattenPts),
+    gyro,
+  };
 }

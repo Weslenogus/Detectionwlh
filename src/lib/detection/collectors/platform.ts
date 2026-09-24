@@ -5,19 +5,19 @@ import { attempt } from "../util/safe";
  * Browser builds are compiled per platform, so some Web APIs only exist on
  * Android (Web NFC, Contact Picker, window.orientation), some only on iOS
  * (motion permission prompt, -webkit-touch-callout) and some only on desktop
- * (EyeDropper, File System Access pickers, WebHID, Window Management...).
+ * (EyeDropper, WebHID, Window Management, Document PiP, Local Font Access...).
  * Device emulation changes the UA, screen and touch — it cannot add or remove
  * compiled-in interfaces. The engine compares this map to what the UA claims.
  */
 export const ANDROID_ONLY_APIS = ["NDEFReader", "ContactsManager", "windowOrientation"] as const;
 export const IOS_ONLY_APIS = ["motionRequestPermission", "webkitTouchCallout", "ontouchstart", "TouchEvent"] as const;
+// Note: navigator.keyboard and showOpenFilePicker (Chrome ≥ 132) also exist on
+// Android, so they are recorded but deliberately *not* treated as desktop-only.
 export const DESKTOP_ONLY_BLINK_APIS = [
   "EyeDropper",
-  "showOpenFilePicker",
   "hid",
   "getScreenDetails",
   "documentPictureInPicture",
-  "keyboardMap",
   "queryLocalFonts",
   "windowControlsOverlay",
 ] as const;

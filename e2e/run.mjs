@@ -5,7 +5,9 @@
 //   npm run test:e2e                 # starts `next dev` on a free port
 //   BASE_URL=https://... npm run test:e2e
 //   CHROMIUM_PATH=/path/to/chrome npm run test:e2e
+//   FACE_CLIPS=test-results/face-clips npm run test:e2e   # + 3D head-turn scenarios (see e2e/face-clips.mjs)
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
@@ -15,6 +17,8 @@ const OUT = process.env.E2E_OUT ?? "test-results";
 mkdirSync(OUT, { recursive: true });
 
 const FAKE_CAMERA = ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"];
+const FACE_CLIPS = process.env.FACE_CLIPS;
+const clip = (name) => [...FAKE_CAMERA, `--use-file-for-fake-video-capture=${join(FACE_CLIPS ?? "", name)}`];
 
 const SCENARIOS = [
   {
@@ -28,7 +32,9 @@ const SCENARIOS = [
     name: "devtools-pixel7",
     about: "Desktop Chromium emulating a Pixel 7 (UA, viewport, DPR, touch) — what DevTools device mode does",
     args: FAKE_CAMERA,
-    context: { ...devices["Pixel 7"] },
+    // DevTools/Playwright location overrides report an impossible 0 m accuracy.
+    context: { ...devices["Pixel 7"], geolocation: { latitude: 43.65, longitude: -79.38 } },
+    grant: ["geolocation"],
     expect: { notDecision: "approve", notClass: "phone" },
   },
   {
@@ -64,6 +70,25 @@ const SCENARIOS = [
     },
     expect: { notDecision: "approve", notClass: "phone", cameraNot: "physical" },
   },
+  // 3D head-turn liveness, fed with clips rendered by e2e/face-clips.mjs.
+  ...(FACE_CLIPS
+    ? [
+        {
+          name: "photo-tilt",
+          about: "A portrait photo tilted ±35° in front of the camera (print / screen presentation attack)",
+          args: clip("flat.mjpeg"),
+          context: { ...devices["Pixel 7"] },
+          expect: { notDecision: "approve", depth: "flat" },
+        },
+        {
+          name: "face-mesh-3d",
+          about: "A textured 3D face mesh turning right then left: must read as 3D geometry, never flat",
+          args: clip("mesh-rl.mjpeg"),
+          context: { ...devices["Pixel 7"] },
+          expect: { notDecision: "approve", depthNot: "flat", minDepthSlope: 0.08 },
+        },
+      ]
+    : []),
 ];
 
 async function freePort() {
@@ -92,7 +117,7 @@ async function waitFor(url, ms = 120_000) {
 
 async function runScenario(browserPath, base, sc) {
   const browser = await chromium.launch({ executablePath: browserPath, headless: true, args: sc.args });
-  const context = await browser.newContext({ ...sc.context, permissions: ["camera"] });
+  const context = await browser.newContext({ ...sc.context, permissions: ["camera", ...(sc.grant ?? [])] });
   if (sc.init) await context.addInitScript(sc.init);
   const page = await context.newPage();
   const logs = [];
@@ -126,6 +151,10 @@ function check(sc, report) {
   if (e.notClass && report.deviceClass === e.notClass) errs.push(`device class must not be ${e.notClass}`);
   if (e.cameraNot && report.camera.cameraClass === e.cameraNot) errs.push(`camera class must not be ${e.cameraNot}`);
   if (e.flagsInclude && !report.flags.some((f) => e.flagsInclude.test(f))) errs.push(`flags should include ${e.flagsInclude}`);
+  const depth = report.camera.depth;
+  if (e.depth && depth?.verdict !== e.depth) errs.push(`3D verdict should be ${e.depth}, got ${depth?.verdict}`);
+  if (e.depthNot && depth?.verdict === e.depthNot) errs.push(`3D verdict must not be ${e.depthNot}`);
+  if (e.minDepthSlope && !((depth?.depthSlope ?? 0) >= e.minDepthSlope)) errs.push(`depth slope should be ≥ ${e.minDepthSlope}, got ${depth?.depthSlope}`);
   if (!report.signature?.token) errs.push("report is not server-signed");
   return errs;
 }
@@ -140,7 +169,7 @@ if (!base) {
   server = spawn(join("node_modules", ".bin", "next"), ["dev", "-p", String(port)], {
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
-    env: { ...process.env, NEXT_TELEMETRY_DISABLED: "1" },
+    env: { ...process.env, NEXT_TELEMETRY_DISABLED: "1", DETECTION_SECRET: process.env.DETECTION_SECRET ?? randomBytes(32).toString("hex") },
   });
   server.stdout.on("data", (d) => process.env.E2E_VERBOSE && process.stdout.write(d));
   server.stderr.on("data", (d) => process.env.E2E_VERBOSE && process.stderr.write(d));
@@ -163,6 +192,8 @@ try {
       console.log(`  decision=${r.decision} class=${r.deviceClass} risk=${r.riskScore} (${ms} ms)`);
       console.log(`  ${probs}`);
       console.log(`  camera=${r.camera.cameraClass} ${r.camera.confidence ? (r.camera.confidence * 100).toFixed(1) + "%" : ""} liveness=${r.camera.liveness}`);
+      const d = r.camera.depth;
+      if (d) console.log(`  3D=${d.verdict} reached=${d.reached.join("→") || "—"} parallax=${d.parallax} slope=${d.depthSlope} tilt=${d.tilt}`);
       for (const f of r.flags) console.log(`  ⚑ ${f}`);
       if (logs.length) console.log(`  console errors: ${logs.slice(0, 3).join(" | ")}`);
       const errs = check(sc, r);

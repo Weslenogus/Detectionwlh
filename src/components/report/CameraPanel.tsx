@@ -1,6 +1,7 @@
 "use client";
 
 import { FLASH_COLORS } from "@/lib/detection/camera/flash";
+import { baselineOf, DEPTH_SLOPE_LIVE, TURN_THRESHOLD } from "@/lib/detection/camera/liveness3d";
 import type { CameraSignals, FlashColor, FrameMetric, Report } from "@/lib/detection/types";
 import { LineChart } from "../charts/LineChart";
 import { Card, KV, pct, StatusPill } from "../ui";
@@ -54,6 +55,11 @@ export function CameraPanel({ report, camera, snapshot }: { report: Report; came
             {fl && (
               <StatusPill status={fl.verdict === "responsive" ? "pass" : fl.verdict === "none" ? "warn" : "info"}>liveness {fl.verdict}</StatusPill>
             )}
+            {report.camera.depth && report.camera.depth.verdict !== "unavailable" && (
+              <StatusPill status={report.camera.depth.verdict === "live-3d" ? "pass" : report.camera.depth.verdict === "flat" ? "fail" : "warn"}>
+                3D {report.camera.depth.verdict}
+              </StatusPill>
+            )}
           </div>
           <p className="text-xs text-muted">The snapshot never leaves this device; only numeric frame statistics are sent for scoring.</p>
         </div>
@@ -93,6 +99,8 @@ export function CameraPanel({ report, camera, snapshot }: { report: Report; came
         </div>
       )}
 
+      <DepthSection report={report} camera={camera} />
+
       {f.metrics.some((m) => m.temporalSigma !== null) && (
         <LineChart
           title="Frame-to-frame sensor noise"
@@ -126,5 +134,57 @@ export function CameraPanel({ report, camera, snapshot }: { report: Report; came
         <KV k="Controls" v={f.capabilities ? Object.keys(f.capabilities).length + " capabilities" : "none"} />
       </dl>
     </Card>
+  );
+}
+
+const DEPTH_TEXT: Record<"live-3d" | "flat" | "incomplete" | "unavailable", string> = {
+  "live-3d": "Real 3D head, turned live in the issued order",
+  flat: "Flat face — photo, screen or flat mask",
+  incomplete: "Head-turn challenge not completed",
+  unavailable: "Face tracking unavailable",
+};
+
+/** Active 3D liveness: nose-parallax track, planarity residual and phone rotation. */
+function DepthSection({ report, camera }: { report: Report; camera: CameraSignals }) {
+  const a = camera.active3d;
+  const d = report.camera.depth;
+  if (!a || !d || a.status === "skipped") return null;
+  const t0 = a.track[0]?.t ?? 0;
+  const base = baselineOf(a.track[0]?.nose);
+  return (
+    <div>
+      <h3 className="text-sm font-semibold">3D head-turn liveness</h3>
+      <p className="mb-3 text-xs text-muted">
+        {DEPTH_TEXT[d.verdict]}. The nose tip sits in front of the face outline, so on a real head it swings against the cheeks as the head turns, and the
+        landmarks stop fitting a single planar mapping (homography) in proportion to the turn. A tilted photo or screen only narrows — its nose stays centred.
+      </p>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <Tile label="Turn order" value={d.reached.join(" → ") || "—"} hint={`asked ${a.challenge.join(" → ")}${d.orderOk ? " ✓" : ""}`} />
+        <Tile label="Nose parallax" value={d.parallax !== null ? d.parallax.toFixed(2) : "—"} hint={`face widths · ±${TURN_THRESHOLD} per turn`} />
+        <Tile
+          label="Depth slope"
+          value={d.depthSlope !== null ? d.depthSlope.toFixed(2) : "—"}
+          hint={`≥ ${DEPTH_SLOPE_LIVE} real head${d.planarityResidual !== null ? ` · residual ${d.planarityResidual.toFixed(3)}` : ""}`}
+        />
+        <Tile
+          label={d.verdict === "flat" ? "Flat tilt" : "Phone rotation"}
+          value={d.verdict === "flat" ? `${Math.round((d.tilt ?? 0) * 100)}%` : d.deviceRotationDeg !== null ? `${d.deviceRotationDeg.toFixed(0)}°` : "n/a"}
+          hint={d.verdict === "flat" ? "face narrowed, nose centred" : d.durationMs !== null ? `during ${(d.durationMs / 1000).toFixed(1)} s` : undefined}
+        />
+      </div>
+      {a.track.length > 3 && (
+        <div className="mt-4">
+          <LineChart
+            title="Nose offset against the face outline"
+            subtitle={`Relative to the frontal pose. Positive = turned to the user's left, negative = right. A turn counts past ±${TURN_THRESHOLD} face widths.`}
+            height={130}
+            series={[{ id: "nose", label: "nose offset", color: "var(--series-1)", points: a.track.map((p) => ({ x: p.t - t0, y: p.nose - base })) }]}
+            xFormat={(x) => `${(x / 1000).toFixed(1)} s`}
+            yFormat={(y) => y.toFixed(2)}
+            refLine={{ y: 0, label: "frontal" }}
+          />
+        </div>
+      )}
+    </div>
   );
 }

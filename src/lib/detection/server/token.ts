@@ -1,13 +1,18 @@
 import "server-only";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import type { PoseDir } from "../camera/liveness3d";
 import type { FlashColor } from "../types";
 
 export interface SessionPayload {
   typ: "session";
   sid: string;
+  /** Optional relying-party subject (user / transaction id) the session is bound to. */
+  sub?: string;
   iat: number;
   exp: number;
   seq: FlashColor[];
+  /** Head-turn order for the active 3D liveness challenge. */
+  pose?: PoseDir[];
   v: 1;
 }
 
@@ -25,10 +30,11 @@ function key(): Buffer {
   const env = process.env.DETECTION_SECRET;
   if (env && env.length >= 32) {
     secret = Buffer.from(env, "utf8");
+  } else if (process.env.NODE_ENV === "production" && process.env.DETECTION_ALLOW_EPHEMERAL_KEY !== "1") {
+    // With several instances an ephemeral key silently breaks every session; refuse instead.
+    throw new Error("DETECTION_SECRET (>= 32 chars) must be set in production");
   } else {
-    if (!warned && process.env.NODE_ENV === "production") {
-      console.warn("[detection] DETECTION_SECRET is missing or shorter than 32 chars — using an ephemeral per-process key.");
-    }
+    if (!warned) console.warn("[detection] DETECTION_SECRET missing — using an ephemeral per-process key (dev only).");
     warned = true;
     secret = randomBytes(32);
   }

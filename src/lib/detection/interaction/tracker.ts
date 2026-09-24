@@ -1,4 +1,4 @@
-import type { ClickRecord, InteractionSignals, PointerRecord, TouchRecord } from "../types";
+import type { BehaviorSignals, ClickRecord, InteractionSignals, PointerRecord, TouchRecord } from "../types";
 
 const MAX = 160;
 
@@ -21,6 +21,19 @@ export class InteractionTracker {
   private lastDown: { t: number; type: string } | null = null;
   private lastHold: number | null = null;
   private attached = false;
+  private behavior = {
+    hiddenCount: 0,
+    hiddenMs: 0,
+    hiddenSince: null as number | null,
+    blurCount: 0,
+    pastes: 0,
+    copies: 0,
+    resizes: 0,
+    orientationChanges: 0,
+    hiddenDuringCamera: false,
+  };
+  private marks: Record<string, number> = {};
+  private cameraActive = false;
 
   private now = () => Math.round(performance.now() - this.t0);
 
@@ -82,6 +95,40 @@ export class InteractionTracker {
     });
   };
 
+  private onVisibility = () => {
+    const b = this.behavior;
+    if (document.visibilityState === "hidden") {
+      b.hiddenCount++;
+      b.hiddenSince = performance.now();
+      if (this.cameraActive) b.hiddenDuringCamera = true;
+    } else if (b.hiddenSince !== null) {
+      b.hiddenMs += performance.now() - b.hiddenSince;
+      b.hiddenSince = null;
+    }
+  };
+  private onBlur = () => {
+    this.behavior.blurCount++;
+  };
+  private onPaste = () => {
+    this.behavior.pastes++;
+  };
+  private onCopy = () => {
+    this.behavior.copies++;
+  };
+  private onResize = () => {
+    this.behavior.resizes++;
+  };
+  private onOrientation = () => {
+    this.behavior.orientationChanges++;
+  };
+
+  /** Timestamp a flow milestone (e.g. "continue-device-shown"), relative to tracker start. */
+  mark(name: string) {
+    this.marks[name] = this.now();
+    if (name === "camera-start") this.cameraActive = true;
+    if (name === "camera-end") this.cameraActive = false;
+  }
+
   private onWheel = () => {
     this.counts.wheel++;
   };
@@ -98,6 +145,12 @@ export class InteractionTracker {
     document.addEventListener("click", this.onClick, opts);
     document.addEventListener("wheel", this.onWheel, opts);
     document.addEventListener("keydown", this.onKey, opts);
+    document.addEventListener("visibilitychange", this.onVisibility);
+    document.addEventListener("paste", this.onPaste, opts);
+    document.addEventListener("copy", this.onCopy, opts);
+    window.addEventListener("blur", this.onBlur);
+    window.addEventListener("resize", this.onResize, { passive: true });
+    window.addEventListener("orientationchange", this.onOrientation);
   }
 
   detach() {
@@ -109,14 +162,36 @@ export class InteractionTracker {
     document.removeEventListener("click", this.onClick, opts);
     document.removeEventListener("wheel", this.onWheel, opts);
     document.removeEventListener("keydown", this.onKey, opts);
+    document.removeEventListener("visibilitychange", this.onVisibility);
+    document.removeEventListener("paste", this.onPaste, opts);
+    document.removeEventListener("copy", this.onCopy, opts);
+    window.removeEventListener("blur", this.onBlur);
+    window.removeEventListener("resize", this.onResize);
+    window.removeEventListener("orientationchange", this.onOrientation);
   }
 
   snapshot(): InteractionSignals {
+    const b = this.behavior;
+    const nav = (performance.getEntriesByType?.("navigation")[0] as PerformanceNavigationTiming | undefined)?.type ?? null;
+    const behavior: BehaviorSignals = {
+      navigationType: nav,
+      pageAgeMs: Math.round(performance.now()),
+      hiddenCount: b.hiddenCount,
+      hiddenMs: Math.round(b.hiddenMs + (b.hiddenSince !== null ? performance.now() - b.hiddenSince : 0)),
+      blurCount: b.blurCount,
+      pastes: b.pastes,
+      copies: b.copies,
+      resizes: b.resizes,
+      orientationChanges: b.orientationChanges,
+      marks: { ...this.marks },
+      hiddenDuringCamera: b.hiddenDuringCamera,
+    };
     return {
       pointers: [...this.pointers],
       touches: [...this.touches],
       clicks: [...this.clicks],
       counts: { ...this.counts },
+      behavior,
     };
   }
 }

@@ -1,3 +1,4 @@
+import { parseSecChUa } from "../../util/sec-ch-ua";
 import type { Add, Ctx } from "../context";
 
 const unquote = (s: string | undefined) => (s ?? "").replace(/^"|"$/g, "");
@@ -58,6 +59,31 @@ export function serverRules(c: Ctx, add: Add) {
       detail: "The model announced over HTTP differs from the one reported to JavaScript.",
       status: "fail",
       evidence: { spoofed: 1.0 },
+    });
+  }
+  const hdrBrands = parseSecChUa(h["sec-ch-ua"]);
+  if (hdrBrands.length && nav.uaData?.brands?.length) {
+    const key = (b: { brand: string; version: string }) => `${b.brand}/${b.version}`;
+    const js = new Set(nav.uaData.brands.map(key));
+    const same = hdrBrands.length === js.size && hdrBrands.every((b) => js.has(key(b)));
+    add({
+      id: "server.ch-brands",
+      title: "Sec-CH-UA brands vs JavaScript",
+      value: same ? `${hdrBrands.length} brands identical` : `header ${hdrBrands.map(key).join(", ")}`,
+      detail: same ? "The brand list sent over HTTP matches navigator.userAgentData.brands." : "HTTP and JavaScript report different browser brand lists.",
+      status: same ? "pass" : "fail",
+      evidence: same ? {} : { spoofed: 1.5, automation: 0.3 },
+    });
+  }
+  if (typeof s.clockSkewMs === "number") {
+    const off = Math.abs(s.clockSkewMs);
+    add({
+      id: "server.clock",
+      title: "Device clock",
+      value: `${s.clockSkewMs >= 0 ? "+" : "−"}${off < 60_000 ? `${(off / 1000).toFixed(1)} s` : `${Math.round(off / 60_000)} min`} vs server`,
+      detail: off > 10 * 60_000 ? "The device clock is far off network time — phones sync automatically; a manipulated clock is a spoofing tell." : "Clock in sync (includes network latency).",
+      status: off > 10 * 60_000 ? "warn" : "info",
+      evidence: off > 10 * 60_000 ? { spoofed: 0.4 } : {},
     });
   }
   const al = h["accept-language"];

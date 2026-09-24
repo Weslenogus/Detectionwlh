@@ -76,6 +76,13 @@ const deviceSchema = loose({
   automation: loose({ knownGlobals: z.array(str(128)).max(64), documentMarkers: z.array(str(128)).max(64) }),
   fingerprint: loose({ fonts: z.array(str(64)).max(128) }),
   environment: loose({ battery: loose({ supported: z.boolean() }), connection: loose({ supported: z.boolean() }) }),
+  hostOs: loose({ systemUiFont: str(64).nullable() }).optional(),
+  timezone: loose({ zone: str(128), consistent: z.boolean().nullable() }).optional(),
+  mediaCaps: loose({ supported: z.boolean(), rtcVideoCodecs: z.array(str(64)).max(32) }).optional(),
+  webrtc: loose({ supported: z.boolean(), srflxIps: z.array(str(64)).max(8), candidateTypes: z.array(str(16)).max(8) }).optional(),
+  privacy: loose({ incognito: z.boolean().nullable() }).optional(),
+  botd: loose({ bot: z.boolean().nullable(), kind: str(64).nullable() }).optional(),
+  fpjs: loose({ visitorId: str(64).nullable() }).optional(),
 });
 
 const numOrNull = z.number().nullable();
@@ -96,6 +103,7 @@ const interactionSchema = loose({
   touches: z.array(loose({ type: str(32), isTrusted: z.boolean() })).max(400),
   clicks: z.array(loose({ isTrusted: z.boolean(), precededByPointerDown: z.boolean() })).max(400),
   counts: z.record(str(32), n),
+  behavior: loose({ marks: z.record(str(64), n), hiddenCount: n, pastes: n }).optional(),
 }).nullable();
 
 const captureSchema = loose({
@@ -104,7 +112,25 @@ const captureSchema = loose({
   settings: z.record(str(64), z.unknown()),
   metrics: z.array(loose({ t: n, r: n, g: n, b: n })).max(240),
   timing: loose({ frames: n, captureMs: n }),
+  // Only the timing of the flash schedule is used; colours and verdict are re-derived server-side.
+  flash: loose({ schedule: z.array(loose({ start: n, end: n })).max(8) }).nullable().optional(),
 }).nullable();
+
+const keyFrame = z.array(n).max(256).nullable();
+const active3dSchema = loose({
+  status: z.enum(["completed", "timeout", "no-face", "unavailable", "error", "skipped"]),
+  frameAspect: n.optional(),
+  challenge: z.array(z.enum(["left", "right"])).max(4),
+  achieved: z.array(z.enum(["left", "right"])).max(4),
+  window: loose({ start: n, end: n }).nullable(),
+  frames: n,
+  track: z.array(loose({ t: n, nose: n, yaw: nn, faceW: n, faces: n })).max(200),
+  samples: z.array(z.array(n).max(256)).max(48).optional(),
+  keyFrames: loose({ frontal: keyFrame, left: keyFrame, right: keyFrame }),
+  gyro: z.array(z.array(n).length(4)).max(320).optional(),
+})
+  .nullable()
+  .optional();
 
 const cameraSchema = loose({
   supported: z.boolean(),
@@ -116,11 +142,28 @@ const cameraSchema = loose({
   front: captureSchema,
   rear: captureSchema,
   challengeSequence: z.array(z.enum(["red", "green", "blue", "white"])).max(8),
+  active3d: active3dSchema,
+}).nullable();
+
+const locationSchema = loose({
+  state: z.enum(["granted", "denied", "unavailable", "timeout", "error", "skipped"]),
+  accuracy: nn.optional(),
+  lat: nn.optional(),
+  lon: nn.optional(),
+}).nullable();
+
+const clientSchema = loose({
+  storageId: str(64).nullable(),
+  runs: n,
+  firstSeenAt: nn,
+  sentAt: n,
 }).nullable();
 
 export const analyzeRequestSchema = z.object({
   sessionToken: str(4096),
   bundle: z.object({
+    client: clientSchema.optional(),
+    location: locationSchema.optional(),
     device: deviceSchema,
     motion: motionSchema,
     interaction: interactionSchema,

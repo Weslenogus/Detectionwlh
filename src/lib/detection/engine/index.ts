@@ -25,8 +25,9 @@ import type {
 import { CAMERA_CLASSES, DEVICE_CLASSES } from "../types";
 import { buildContext, makeCollector, type Add, type Ctx } from "./context";
 import { buildProfile, deviceName } from "./profile";
+import { behaviorRules, botdRules, hostOsRules, mediaHardwareRules, networkRules, uaConsistencyRules } from "./rules/advanced";
 import { automationRules } from "./rules/automation";
-import { cameraRules } from "./rules/camera";
+import { cameraRules, ORBIT_DEG } from "./rules/camera";
 import { environmentRules } from "./rules/environment";
 import { graphicsRules } from "./rules/graphics";
 import { hardwareRules } from "./rules/hardware";
@@ -49,23 +50,33 @@ export const CATEGORY_META: Record<CategoryId, { title: string; description: str
   integrity: { title: "Tamper resistance", description: "Native-code verification, iframe & worker cross-checks" },
   automation: { title: "Automation", description: "WebDriver, headless, CDP and stealth-plugin artefacts" },
   environment: { title: "Host environment", description: "Fonts, voices, network link, media hardware" },
-  camera: { title: "Camera", description: "Provenance, hardware controls, pixel forensics, liveness" },
-  server: { title: "Network layer", description: "HTTP headers vs JavaScript, IP geolocation" },
+  camera: { title: "Camera", description: "Provenance, hardware controls, pixel forensics, liveness, face" },
+  network: { title: "Network & location", description: "IP reputation, carrier, VPN/proxy/Tor, WebRTC path, GNSS fix" },
+  behavior: { title: "Behaviour & links", description: "Reaction times, tab switching, velocity, identity switching" },
+  server: { title: "HTTP layer", description: "HTTP headers vs JavaScript, clock, edge geolocation" },
 };
 
 const RULES: [CategoryId, (c: Ctx, add: Add) => void][] = [
   ["identity", identityRules],
+  ["identity", uaConsistencyRules],
   ["hardware", hardwareRules],
+  ["hardware", mediaHardwareRules],
   ["graphics", graphicsRules],
   ["sensors", sensorRules],
   ["touch", touchRules],
   ["platform", platformRules],
   ["integrity", integrityRules],
   ["automation", automationRules],
+  ["automation", botdRules],
   ["environment", environmentRules],
+  ["environment", hostOsRules],
   ["camera", cameraRules],
+  ["network", networkRules],
+  ["behavior", behaviorRules],
   ["server", serverRules],
 ];
+
+const CATEGORY_ORDER = Array.from(new Set(RULES.map(([c]) => c)));
 
 const DEVICE_PRIOR: Record<DeviceClass, number> = {
   phone: 0.35,
@@ -119,6 +130,13 @@ export interface EvaluateOptions {
   source: "client" | "server";
   id?: string;
   now?: number;
+  /** An "approve" decision requires a completed camera test (always true on the server). */
+  requireCamera?: boolean;
+  /**
+   * An "approve" decision requires a passed 3D head-turn challenge. Defaults to
+   * "whenever the challenge was issued"; the server sets it from the signed session.
+   */
+  requireDepth?: boolean;
 }
 
 export function evaluate(bundle: SignalBundle, opts: EvaluateOptions): Report {
@@ -136,7 +154,7 @@ export function evaluate(bundle: SignalBundle, opts: EvaluateOptions): Report {
   /* ----------------------------- Device posterior ----------------------------- */
   const logits = Object.fromEntries(DEVICE_CLASSES.map((k) => [k, Math.log(DEVICE_PRIOR[k])])) as Record<DeviceClass, number>;
   const categories: CategorySummary[] = [];
-  for (const [cat] of RULES) {
+  for (const cat of CATEGORY_ORDER) {
     const fs = findings.filter((f) => f.category === cat);
     if (!fs.length) continue;
     const sums = sumEvidence(DEVICE_CLASSES, fs, (f) => f.evidence, CATEGORY_CAP);
@@ -176,22 +194,41 @@ export function evaluate(bundle: SignalBundle, opts: EvaluateOptions): Report {
   const isRealPhone = deviceClass === "phone" && pPhone >= 0.8;
   const cameraBad = camTested && cameraClass !== "physical" && (camConf ?? 0) >= 0.75;
   const hardFail = probabilities.automation >= 0.5 || probabilities.spoofed >= 0.6 || probabilities.emulator >= 0.6 || cameraBad;
-  const camOk = camTested ? cameraClass === "physical" && (camConf ?? 0) >= 0.7 : !bundle.camera;
+  const camOk = camTested ? cameraClass === "physical" && (camConf ?? 0) >= 0.7 : !bundle.camera && !opts.requireCamera;
+  // Active 3D liveness: a flat face is a presentation attack; anything short of a live 3D turn
+  // in the issued order, with the phone held steady, needs a human look.
+  const depth = ctx.depth;
+  const active3d = bundle.camera?.active3d;
+  const depthRequired = camTested && (opts.requireDepth ?? Boolean(active3d && active3d.status !== "skipped"));
+  const presentationAttack = depth?.verdict === "flat";
+  const depthOk =
+    !depthRequired ||
+    (depth?.verdict === "live-3d" && depth.orderOk === true && (depth.deviceRotationDeg === null || depth.deviceRotationDeg < ORBIT_DEG));
   let decision: Decision = "review";
-  if (isRealPhone && pPhone >= 0.85 && camOk && !hardFail) decision = "approve";
-  else if (hardFail || pPhone < 0.2) decision = "decline";
+  if (isRealPhone && pPhone >= 0.85 && camOk && depthOk && !hardFail && !presentationAttack) decision = "approve";
+  else if (hardFail || presentationAttack || pPhone < 0.2) decision = "decline";
 
   const camFactor = camTested ? camProbs!.physical : bundle.camera ? 0.5 : 0.85;
   const riskScore = Math.round(clamp(100 * (1 - pPhone * camFactor), 0, 100));
 
   const flags = findings
-    .filter((f) => f.status === "fail" && (f.weight >= 2 || (f.cameraEvidence && Object.values(f.cameraEvidence).some((v) => (v ?? 0) >= 2))))
-    .sort((a, b) => b.weight - a.weight)
+    .filter(
+      (f) =>
+        f.status === "fail" &&
+        (f.weight >= 2 || f.id === "camera.depth" || (f.cameraEvidence && Object.values(f.cameraEvidence).some((v) => (v ?? 0) >= 2))),
+    )
+    .sort((a, b) => Number(b.id === "camera.depth") - Number(a.id === "camera.depth") || b.weight - a.weight)
     .slice(0, 6)
     .map((f) => f.title + (f.value ? `: ${f.value}` : ""));
 
   const cameraHeadline = camTested
-    ? `${CAMERA_HEADLINE[cameraClass!]}${cameraClass === "physical" && liveness === "responsive" ? " · live reflection confirmed" : ""}`
+    ? [
+        CAMERA_HEADLINE[cameraClass!],
+        cameraClass === "physical" && liveness === "responsive" ? "live reflection confirmed" : null,
+        depth?.verdict === "live-3d" ? "3D face confirmed" : presentationAttack ? "flat face (photo / screen)" : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")
     : camPerm === "denied"
       ? "Camera access denied"
       : camPerm === "no-device"
@@ -261,6 +298,7 @@ export function evaluate(bundle: SignalBundle, opts: EvaluateOptions): Report {
       probabilities: camProbs,
       headline: cameraHeadline,
       liveness,
+      depth: depth ?? null,
     },
     profile,
     categories,

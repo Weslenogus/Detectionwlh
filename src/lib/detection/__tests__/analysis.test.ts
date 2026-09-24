@@ -135,11 +135,18 @@ describe("interaction analysis", () => {
     expect(analyzeInteraction(mouseClicks()).verdict).toBe("mouse");
   });
 
-  it("flags programmatic clicks", () => {
+  it("flags untrusted (script-dispatched) clicks", () => {
+    const s = fingerTaps();
+    s.pointers = [];
+    s.clicks = s.clicks.map((c) => ({ ...c, isTrusted: false, precededByPointerDown: false }));
+    expect(analyzeInteraction(s).verdict).toBe("scripted");
+  });
+
+  it("does not treat keyboard / screen-reader activation as scripted", () => {
     const s = fingerTaps();
     s.pointers = [];
     s.clicks = s.clicks.map((c) => ({ ...c, precededByPointerDown: false }));
-    expect(analyzeInteraction(s).verdict).toBe("scripted");
+    expect(analyzeInteraction(s).verdict).not.toBe("scripted");
   });
 });
 
@@ -182,5 +189,17 @@ describe("knowledge bases", () => {
   it("recognises emulator models", () => {
     expect(matchEmulatorModel("sdk_gphone64_arm64")).toBeTruthy();
     expect(matchEmulatorModel("Pixel 8")).toBeNull();
+  });
+});
+
+describe("flash permutation test", () => {
+  it("does not credit colour drift that only correlates by chance", () => {
+    const schedule = (["red", "blue", "green", "red"] as const).map((color, i) => ({ color, start: i * 250, end: (i + 1) * 250 }));
+    // A generated feed cycling its hue — like a canvas-injected stream.
+    const metrics = Array.from({ length: 30 }, (_, i) => {
+      const hue = (i * 7 * Math.PI) / 180;
+      return { t: i * 33.3, meanY: 100, stdY: 30, r: 120 + 60 * Math.cos(hue), g: 120 + 60 * Math.cos(hue - 2.1), b: 120 + 60 * Math.cos(hue + 2.1), diff: 1, zeroDiff: 0.3, temporalSigma: 1, spatialSigma: 2, clipped: 0 };
+    });
+    expect(analyzeFlash(metrics, ["red", "blue", "green", "red"], schedule).verdict).not.toBe("responsive");
   });
 });

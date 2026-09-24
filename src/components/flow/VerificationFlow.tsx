@@ -4,13 +4,17 @@ import { LoaderCircle, Lock } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CameraTestResult } from "@/lib/detection/camera/capture";
 import { preloadFaceDetector } from "@/lib/detection/camera/face";
+import { loadClientContext } from "@/lib/detection/client-context";
+import { requestLocation } from "@/lib/detection/collectors/geolocation";
+import { DETECTION_CONFIG } from "@/lib/detection/config";
 import { randomSequence } from "@/lib/detection/camera/flash";
+import { isValidPose, randomPoseOrder, type PoseDir } from "@/lib/detection/camera/liveness3d";
 import { runDeviceScan, SCAN_STEPS } from "@/lib/detection/collect";
 import { evaluate } from "@/lib/detection/engine";
 import { InteractionTracker } from "@/lib/detection/interaction/tracker";
 import { analyzeMotion } from "@/lib/detection/sensors/analysis";
 import { motionPermissionRequired, MotionSampler, requestMotionPermission } from "@/lib/detection/sensors/motion-sampler";
-import type { DeviceSignals, FlashColor, Report, SignalBundle } from "@/lib/detection/types";
+import type { ClientContext, DeviceSignals, FlashColor, LocationSignals, Report, SignalBundle } from "@/lib/detection/types";
 import { errorMessage, sleep } from "@/lib/detection/util/safe";
 import { ReportView } from "../report/ReportView";
 import { Card, cx } from "../ui";
@@ -22,6 +26,7 @@ type Stage = "scan" | "camera" | "submitting" | "report";
 interface Session {
   token: string | null;
   challenge: FlashColor[];
+  pose: PoseDir[];
   id: string | null;
   error?: string;
 }
@@ -32,11 +37,12 @@ async function createSession(): Promise<Session> {
   try {
     const r = await fetch("/api/session", { method: "POST", cache: "no-store" });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const j = (await r.json()) as { sessionToken: string; challenge: FlashColor[]; sessionId: string };
-    return { token: j.sessionToken, challenge: j.challenge, id: j.sessionId };
+    const j = (await r.json()) as { sessionToken: string; challenge: FlashColor[]; pose?: PoseDir[]; sessionId: string };
+    return { token: j.sessionToken, challenge: j.challenge, pose: isValidPose(j.pose) ? j.pose : [], id: j.sessionId };
   } catch (e) {
     // Offline / static hosting: fall back to a local challenge and client-side scoring.
-    return { token: null, challenge: randomSequence(), id: null, error: errorMessage(e) };
+    const pose = DETECTION_CONFIG.activeLiveness ? randomPoseOrder() : [];
+    return { token: null, challenge: randomSequence(), pose, id: null, error: errorMessage(e) };
   }
 }
 
@@ -53,6 +59,8 @@ export function VerificationFlow() {
   const motion = useRef<MotionSampler | null>(null);
   const tracker = useRef<InteractionTracker | null>(null);
   const started = useRef(false);
+  const client = useRef<Omit<ClientContext, "sentAt"> | null>(null);
+  const location = useRef<Promise<LocationSignals> | null>(null);
 
   useEffect(() => {
     if (started.current) return;
@@ -63,6 +71,7 @@ export function VerificationFlow() {
     const t = new InteractionTracker();
     tracker.current = t;
     t.attach();
+    client.current = loadClientContext();
     void createSession().then(setSession);
 
     const t0 = performance.now();
@@ -87,6 +96,14 @@ export function VerificationFlow() {
     window.scrollTo({ top: 0 });
   }, [stage]);
 
+  // Reaction-time marks: when each Continue button became tappable.
+  useEffect(() => {
+    if (prelim) tracker.current?.mark("continue-device-shown");
+  }, [prelim]);
+  useEffect(() => {
+    if (cameraReport) tracker.current?.mark("continue-camera-shown");
+  }, [cameraReport]);
+
   const onContinueDevice = () => {
     const m = motion.current;
     let permission: Promise<unknown> = Promise.resolve();
@@ -97,6 +114,8 @@ export function VerificationFlow() {
         if (r.state === "granted") m.restart();
       });
     }
+    // Also inside the tap: a GNSS fix (the prompt needs a user gesture on most browsers).
+    if (DETECTION_CONFIG.requestGeolocation) location.current = requestLocation();
     setBeforeCamera(permission);
     setStage("camera");
   };
@@ -116,11 +135,16 @@ export function VerificationFlow() {
   const onContinueCamera = async () => {
     if (!device || !motion.current || !tracker.current) return;
     setStage("submitting");
+    const loc = location.current
+      ? await Promise.race([location.current, new Promise<LocationSignals>((r) => setTimeout(() => r({ state: "timeout" }), 3000))])
+      : ({ state: "skipped" } as LocationSignals);
     const bundle: SignalBundle = {
+      client: client.current ? { ...client.current, sentAt: Date.now() } : null,
       device,
       motion: motion.current.snapshot(),
       interaction: tracker.current.snapshot(),
       camera: camera?.signals ?? null,
+      location: loc,
     };
     let serverError: string | null = session?.error ?? null;
     if (session?.token) {
@@ -141,7 +165,7 @@ export function VerificationFlow() {
         serverError = errorMessage(e);
       }
     }
-    setFinal({ report: evaluate(bundle, { source: "client" }), bundle, serverError });
+    setFinal({ report: evaluate(bundle, { source: "client", requireCamera: true }), bundle, serverError });
     setStage("report");
   };
 
@@ -165,11 +189,13 @@ export function VerificationFlow() {
         (session ? (
           <CameraStep
             sequence={session.challenge}
+            pose={session.pose}
             beforeStart={beforeCamera}
             result={camera}
             cameraReport={cameraReport}
             onFinished={onCameraFinished}
             onContinue={onContinueCamera}
+            onActive={(active) => tracker.current?.mark(active ? "camera-start" : "camera-end")}
           />
         ) : (
           <Card>

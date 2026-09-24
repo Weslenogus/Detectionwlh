@@ -184,7 +184,7 @@ self.onmessage = async () => {
   self.postMessage(out);
 };`;
 
-async function workerProbe(main: {
+interface MainIdentity {
   ua: string;
   platform: string;
   hc: number | null;
@@ -193,8 +193,23 @@ async function workerProbe(main: {
   uaMobile: boolean | null;
   gpu: string | null;
   nan: string;
-}): Promise<CrossRealmSignals> {
+}
+
+/** Compare what another JavaScript realm reports with the page's own view. */
+export function compareRealm(data: CrossRealmSignals, main: MainIdentity): string[] {
   const mismatches: string[] = [];
+  if (data.userAgent !== undefined && data.userAgent !== main.ua) mismatches.push("userAgent");
+  if (data.platform !== undefined && data.platform !== main.platform) mismatches.push("platform");
+  if (main.hc != null && data.hardwareConcurrency != null && data.hardwareConcurrency !== main.hc) mismatches.push("hardwareConcurrency");
+  if (main.dm != null && data.deviceMemory != null && data.deviceMemory !== main.dm) mismatches.push("deviceMemory");
+  if (data.timezone && main.tz && data.timezone !== main.tz) mismatches.push("timezone");
+  if (main.uaMobile != null && data.uaMobile != null && data.uaMobile !== main.uaMobile) mismatches.push("userAgentData.mobile");
+  if (main.gpu && data.gpuRenderer && data.gpuRenderer !== main.gpu) mismatches.push("WebGL renderer");
+  if (data.nanArch && main.nan !== "unknown" && data.nanArch !== "unknown" && data.nanArch !== main.nan) mismatches.push("CPU architecture");
+  return mismatches;
+}
+
+async function workerProbe(main: MainIdentity): Promise<CrossRealmSignals> {
   let url: string | null = null;
   let worker: Worker | null = null;
   try {
@@ -210,20 +225,77 @@ async function workerProbe(main: {
       3000,
       "worker probe",
     );
-    if (data.userAgent !== main.ua) mismatches.push("userAgent");
-    if (data.platform !== main.platform) mismatches.push("platform");
-    if (main.hc != null && data.hardwareConcurrency != null && data.hardwareConcurrency !== main.hc) mismatches.push("hardwareConcurrency");
-    if (main.dm != null && data.deviceMemory != null && data.deviceMemory !== main.dm) mismatches.push("deviceMemory");
-    if (data.timezone && main.tz && data.timezone !== main.tz) mismatches.push("timezone");
-    if (main.uaMobile != null && data.uaMobile != null && data.uaMobile !== main.uaMobile) mismatches.push("userAgentData.mobile");
-    if (main.gpu && data.gpuRenderer && data.gpuRenderer !== main.gpu) mismatches.push("WebGL renderer");
-    if (data.nanArch && main.nan !== "unknown" && data.nanArch !== "unknown" && data.nanArch !== main.nan) mismatches.push("CPU architecture");
-    return { ...data, ok: data.ok !== false, mismatches };
+    return { ...data, ok: data.ok !== false, mismatches: compareRealm(data, main) };
   } catch (e) {
-    return { ok: false, error: errorMessage(e), mismatches };
+    return { ok: false, error: errorMessage(e), mismatches: [] };
   } finally {
     worker?.terminate();
     if (url) URL.revokeObjectURL(url);
+  }
+}
+
+const SANDBOX_SRC = `<!doctype html><script>(async()=>{const o={ok:true};try{const n=navigator;o.userAgent=n.userAgent;o.platform=n.platform;o.hardwareConcurrency=n.hardwareConcurrency??null;o.deviceMemory=typeof n.deviceMemory==='number'?n.deviceMemory:null;o.maxTouchPoints=n.maxTouchPoints??null;o.languages=[...(n.languages||[])];o.webdriver=typeof n.webdriver==='boolean'?n.webdriver:null;o.screenWidth=screen.width;try{o.timezone=Intl.DateTimeFormat().resolvedOptions().timeZone}catch(e){}if(n.userAgentData){o.uaMobile=n.userAgentData.mobile;o.uaPlatform=n.userAgentData.platform}try{const gl=document.createElement('canvas').getContext('webgl');const x=gl&&gl.getExtension('WEBGL_debug_renderer_info');o.gpuRenderer=gl?(x?gl.getParameter(x.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER)):null}catch(e){}const f=new Float32Array(1),u=new Uint8Array(f.buffer),i=[Infinity,Number('Infinity')];f[0]=i[0];f[0]=f[0]-i[1];o.nanArch=u[3]===255?'x86':u[3]===127?'arm':'unknown'}catch(e){o.ok=false;o.error=String(e)}parent.postMessage({__realmProbe:'sandbox',o},'*')})()<\/script>`;
+
+/** Opaque-origin sandboxed iframe: many spoofing extensions don't inject into these. */
+function sandboxProbe(main: MainIdentity): Promise<CrossRealmSignals> {
+  return new Promise((resolve) => {
+    const iframe = document.createElement("iframe");
+    iframe.setAttribute("sandbox", "allow-scripts");
+    iframe.setAttribute("aria-hidden", "true");
+    iframe.tabIndex = -1;
+    iframe.style.cssText = "position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;border:0;left:-9999px;";
+    let done = false;
+    const finish = (r: CrossRealmSignals) => {
+      if (done) return;
+      done = true;
+      window.removeEventListener("message", onMsg);
+      iframe.remove();
+      resolve(r);
+    };
+    const onMsg = (e: MessageEvent) => {
+      if (e.source !== iframe.contentWindow || (e.data as { __realmProbe?: string })?.__realmProbe !== "sandbox") return;
+      const data = (e.data as { o: CrossRealmSignals }).o;
+      finish({ ...data, ok: data.ok !== false, mismatches: compareRealm(data, main) });
+    };
+    window.addEventListener("message", onMsg);
+    iframe.srcdoc = SANDBOX_SRC;
+    document.body.appendChild(iframe);
+    setTimeout(() => finish({ ok: false, error: "sandbox probe timed out", mismatches: [] }), 2500);
+  });
+}
+
+function waitActivated(reg: ServiceWorkerRegistration, ms: number): Promise<ServiceWorker> {
+  return new Promise((resolve, reject) => {
+    if (reg.active) return resolve(reg.active);
+    const sw = reg.installing ?? reg.waiting;
+    sw?.addEventListener("statechange", () => {
+      if (sw.state === "activated") resolve(sw);
+    });
+    setTimeout(() => (reg.active ? resolve(reg.active) : reject(new Error("service worker activation timed out"))), ms);
+  });
+}
+
+/** Service-worker realm: a separate global with its own navigator. */
+async function serviceWorkerProbe(main: MainIdentity): Promise<CrossRealmSignals> {
+  if (!("serviceWorker" in navigator) || !window.isSecureContext) return { ok: false, error: "service workers unavailable", mismatches: [] };
+  let reg: ServiceWorkerRegistration | null = null;
+  try {
+    reg = await withTimeout(navigator.serviceWorker.register("/probe-sw.js", { scope: "/probe-sw/" }), 3000, "service worker register");
+    const sw = await waitActivated(reg, 3000);
+    const data = await withTimeout(
+      new Promise<CrossRealmSignals>((resolve) => {
+        const ch = new MessageChannel();
+        ch.port1.onmessage = (e) => resolve(e.data as CrossRealmSignals);
+        sw.postMessage(null, [ch.port2]);
+      }),
+      2500,
+      "service worker reply",
+    );
+    return { ...data, ok: data.ok !== false, mismatches: compareRealm(data, main) };
+  } catch (e) {
+    return { ok: false, error: errorMessage(e), mismatches: [] };
+  } finally {
+    void reg?.unregister().catch(() => undefined);
   }
 }
 
@@ -304,7 +376,7 @@ export async function collectIntegrity(ctx: IntegrityContext): Promise<Integrity
   }
   frame.cleanup();
 
-  const worker = await workerProbe({
+  const main: MainIdentity = {
     ua: navigator.userAgent,
     platform: navigator.platform,
     hc: ctx.hardwareConcurrency,
@@ -313,7 +385,8 @@ export async function collectIntegrity(ctx: IntegrityContext): Promise<Integrity
     uaMobile: ctx.uaMobile,
     gpu: ctx.gpuRenderer,
     nan: ctx.nanArch,
-  });
+  };
+  const [worker, sandbox, serviceWorker] = await Promise.all([workerProbe(main), sandboxProbe(main), serviceWorkerProbe(main)]);
   const cs = canvasStability();
   return {
     checks,
@@ -322,6 +395,8 @@ export async function collectIntegrity(ctx: IntegrityContext): Promise<Integrity
     screenOwnKeys: attempt(() => Reflect.ownKeys(screen).map(String), []),
     iframe: frame.realm,
     worker,
+    sandbox,
+    serviceWorker,
     canvasStable: cs.stable,
     canvasPixelExact: cs.pixelExact,
     audioStable: ctx.audioStable,

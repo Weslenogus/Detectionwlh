@@ -1,3 +1,4 @@
+import { FLAT_TILT } from "../../camera/liveness3d";
 import { classifyCameraLabel, facingFromLabel, HARDWARE_CAPABILITY_KEYS, hasUsbIds } from "../../knowledge/cameras";
 import type { CameraCapture, MediaDeviceRecord } from "../../types";
 import type { Add, Ctx } from "../context";
@@ -64,7 +65,11 @@ export function cameraRules(c: Ctx, add: Add) {
 
   /* ------------------------------ Inventory -------------------------------- */
   const devices = (cam.devicesAfter.some((d) => d.label) ? cam.devicesAfter : cam.devicesBefore).filter((d) => d.kind === "videoinput");
-  if (devices.length) {
+  // Some engines (Firefox with a one-time grant) return blank labels/ids: that is "unknown", not evidence.
+  const labelsVisible = devices.some((d) => d.label);
+  if (devices.length && !labelsVisible && !devices.some((d) => d.facingMode?.length)) {
+    add({ id: "camera.inventory", title: "Camera inventory", value: `${devices.length} camera(s), labels hidden`, detail: "The browser hides camera names, so the inventory cannot be assessed.", status: "info" });
+  } else if (devices.length) {
     const kinds = devices.map((d) => ({ d, k: classifyCameraLabel(d.label) }));
     const virtualInstalled = kinds.filter((x) => x.k.kind === "virtual" || x.k.kind === "capture-card");
     const rear = devices.filter((d) => facingOf(d) === "back");
@@ -191,8 +196,8 @@ export function cameraRules(c: Ctx, add: Add) {
   (labelFinding[kind.kind] ?? labelFinding.unknown)();
 
   const ctor = f.trackConstructor;
-  const knownIds = new Set(cam.devicesAfter.map((d) => d.deviceId));
-  const idKnown = !f.deviceId || !cam.devicesAfter.length || knownIds.has(f.deviceId);
+  const knownIds = new Set(cam.devicesAfter.map((d) => d.deviceId).filter(Boolean));
+  const idKnown = !f.deviceId || knownIds.size === 0 || knownIds.has(f.deviceId);
   const badCtor = ctor && ctor !== "MediaStreamTrack" && ctor !== "unknown";
   if (badCtor || !f.deviceId || !idKnown) {
     add({
@@ -280,7 +285,8 @@ export function cameraRules(c: Ctx, add: Add) {
     });
   }
 
-  if (!rear && cam.rearError && claims.mobile && /Overconstrained|NotFound|No second camera/i.test(cam.rearError)) {
+  const rearListKnown = cam.devicesAfter.some((d) => d.label || d.facingMode?.length);
+  if (!rear && cam.rearError && claims.mobile && rearListKnown && /Overconstrained|NotFound|No second camera/i.test(cam.rearError)) {
     add({
       id: "camera.rear",
       title: "Rear camera",
@@ -440,23 +446,76 @@ export function cameraRules(c: Ctx, add: Add) {
   /* --------------------------------- Face ---------------------------------- */
   const face = f.face;
   if (face?.available) {
-    const still = face.movement !== null && face.movement === 0 && face.framesWithFace >= 3;
+    const frozen = face.framesWithFace >= 3 && face.landmarkMotion === 0;
+    const pose = face.pose;
     add({
       id: "camera.face",
-      title: "Face detection (BlazeFace)",
-      value: `${face.framesWithFace}/${face.framesAnalyzed} frames · max ${face.maxFaces} face(s)${face.meanScore ? ` · score ${fmt(face.meanScore, 2)}` : ""}${face.movement !== null ? ` · motion ${fmt(face.movement, 4)}` : ""}`,
-      detail: still
-        ? "The face box did not move by a single pixel across the capture — consistent with a still photo."
+      title: "Face (MediaPipe FaceLandmarker, 478 points)",
+      value: `${face.framesWithFace}/${face.framesAnalyzed} frames${face.maxFaces > 1 ? ` · ${face.maxFaces} faces` : ""}${pose ? ` · yaw ${fmt(pose.yaw, 0)}° pitch ${fmt(pose.pitch, 0)}° roll ${fmt(pose.roll, 0)}°` : ""}`,
+      detail: frozen
+        ? "All 478 landmarks stayed pixel-identical across the capture — a still image, not a live face."
         : face.framesWithFace
-          ? face.maxFaces > 1
-            ? "More than one face in view."
-            : "A face was detected with natural micro-movement."
+          ? "A face was tracked with natural landmark micro-motion."
           : "No face in view during the capture.",
-      status: still ? "warn" : face.framesWithFace ? "pass" : "info",
-      cameraEvidence: still ? { virtual: 0.8, injected: 0.6 } : face.framesWithFace ? { physical: 0.3 } : {},
+      status: frozen ? "warn" : face.framesWithFace ? "pass" : "info",
+      cameraEvidence: frozen ? { virtual: 0.8, injected: 0.6, physical: -0.5 } : face.framesWithFace >= 2 ? { physical: 0.3 } : {},
     });
+    if (face.maxFaces > 1) {
+      add({
+        id: "camera.multi-face",
+        title: "Multiple faces",
+        value: `${face.maxFaces} faces in frame`,
+        detail: "More than one person is in view (someone assisting, or a photo held beside the face).",
+        status: "warn",
+      });
+    }
+    if (face.framesWithFace >= 2 && face.landmarkMotion !== null) {
+      add({
+        id: "camera.face-motion",
+        title: "Facial micro-motion",
+        value: `landmarks ${fmt(face.landmarkMotion, 4)} · non-rigid ${fmt(face.nonRigidMotion, 4)} (face-width units)`,
+        detail: "Global motion comes from the hand holding the phone; non-rigid motion (expression, blinking, breathing) remains after removing translation and scale. A printed or on-screen face only moves rigidly.",
+        status: "info",
+      });
+    }
+    if (face.eyeBlink) {
+      const closed = face.eyeBlink.median > 0.6;
+      add({
+        id: "camera.eyes",
+        title: "Eyes",
+        value: `blink score median ${fmt(face.eyeBlink.median, 2)} · max ${fmt(face.eyeBlink.max, 2)}`,
+        detail: closed ? "Eyes appear closed for most of the capture." : face.eyeBlink.max > 0.6 ? "A blink was captured." : "Eyes open.",
+        status: closed ? "warn" : "info",
+      });
+    }
+    if (face.faceArea !== null && face.faceArea !== undefined && face.framesWithFace) {
+      add({
+        id: "camera.face-framing",
+        title: "Face framing",
+        value: `${Math.round(face.faceArea * 100)}% of frame${face.centered === false ? " · off-centre" : ""}`,
+        detail: face.faceArea < 0.03 ? "The face is far from the camera." : "Face size and position recorded.",
+        status: "info",
+      });
+    }
   } else if (face) {
-    add({ id: "camera.face", title: "Face detection (BlazeFace)", value: "model unavailable", detail: face.error ?? "Face model not loaded in time.", status: "info" });
+    add({ id: "camera.face", title: "Face (MediaPipe FaceLandmarker)", value: "model unavailable", detail: face.error ?? "Face model not loaded in time.", status: "info" });
+  }
+
+  /* ------------------------- Active 3D liveness ---------------------------- */
+  depthRules(c, add);
+
+  const mo = A?.moire;
+  if (mo && !A?.dark) {
+    add({
+      id: "camera.moire",
+      title: "Screen recapture (moiré)",
+      value: `spectral peak ×${fmt(mo.peakRatio, 1)} at ${fmt(mo.frequency, 3)} cyc/px`,
+      detail: mo.suspicious
+        ? "A sharp periodic peak dominates the image spectrum — the aliasing pattern produced when a camera films another screen (replay attack)."
+        : "No periodic screen-pixel pattern in the frames.",
+      status: mo.suspicious ? "warn" : "pass",
+      cameraEvidence: mo.suspicious ? { virtual: 0.6, injected: 0.4, physical: -0.6 } : { physical: 0.2 },
+    });
   }
 
   /* ------------------------------ Rear sensor ------------------------------ */
@@ -481,3 +540,92 @@ export function cameraTested(c: Ctx): boolean {
 }
 
 export { facingOf };
+
+/** Phone rotation (°) during the head turn above which the "turn" may be the camera orbiting a static prop. */
+export const ORBIT_DEG = 25;
+
+function depthRules(c: Ctx, add: Add) {
+  const a = c.bundle.camera?.active3d;
+  const d = c.depth;
+  if (!a || !d) return;
+  const order = a.challenge.join(" → ") || "—";
+  if (a.status === "skipped") {
+    add({ id: "camera.depth", title: "3D head-turn liveness", value: "not run", detail: "The head-turn challenge was not performed.", status: "info" });
+    return;
+  }
+  if (d.verdict === "unavailable") {
+    add({
+      id: "camera.depth",
+      title: "3D head-turn liveness",
+      value: a.status,
+      detail: a.error ? `Face tracking unavailable: ${a.error}` : "Face tracking was unavailable on this device.",
+      status: "info",
+    });
+    return;
+  }
+  const geometry = `parallax ${fmt(d.parallax, 2)} · depth slope ${fmt(d.depthSlope, 2)} · tilt ${fmt(d.tilt, 2)}`;
+  if (d.verdict === "flat") {
+    add({
+      id: "camera.depth",
+      title: "3D head-turn liveness",
+      value: `flat · ${geometry}`,
+      detail:
+        (d.tilt ?? 0) >= FLAT_TILT
+          ? "The face narrowed as if turned, but the nose stayed centred between the cheeks — the foreshortening of a flat picture being tilted. A real head's nose always leads the turn. This is a photo, a screen or a flat mask held in front of the camera."
+          : "Across the head turn every facial landmark moved as one plane (a single homography explains the frontal and turned views). A real head has depth — the nose moves differently from the cheeks and ears. This is a photo, a screen or a flat mask held in front of the camera.",
+      status: "fail",
+      evidence: { phone: -0.4 },
+      cameraEvidence: { physical: -1.2, virtual: 1.0, injected: 1.0 },
+    });
+  } else if (d.verdict === "live-3d") {
+    add({
+      id: "camera.depth",
+      title: "3D head-turn liveness",
+      value: `3D face · ${geometry}`,
+      detail:
+        "As the head turned, the nose tip shifted against the face outline and the landmarks departed from any planar mapping in proportion to the turn — the geometry of a real three-dimensional head, followed live.",
+      status: "pass",
+      evidence: { phone: 0.2, tablet: 0.2 },
+      cameraEvidence: { physical: 1.4, virtual: -0.6, injected: -0.8, synthetic: -1.2 },
+    });
+  } else {
+    add({
+      id: "camera.depth",
+      title: "3D head-turn liveness",
+      value: `${a.status === "completed" ? "inconclusive" : a.status} · ${geometry}`,
+      detail:
+        a.status === "no-face"
+          ? "No face was found in view during the head-turn challenge."
+          : a.status === "timeout"
+            ? "The requested head turns were not completed in time."
+            : "The head did not turn far enough to measure depth.",
+      status: "warn",
+      cameraEvidence: a.status === "no-face" ? { synthetic: 0.4 } : {},
+    });
+  }
+
+  add({
+    id: "camera.depth-order",
+    title: "Head-turn challenge order",
+    value: `asked ${order} · did ${d.reached.join(" → ") || "—"}`,
+    detail: d.orderOk
+      ? "The head turned in the order this server issued. A pre-recorded clip cannot know the order in advance."
+      : "The turns did not follow the order this server issued.",
+    status: d.orderOk ? "pass" : "warn",
+    cameraEvidence: d.orderOk ? { injected: -0.3, virtual: -0.3 } : d.reached.length ? { injected: 0.5, virtual: 0.5 } : {},
+  });
+
+  if (d.deviceRotationDeg !== null && (d.parallax ?? 0) >= 0.1) {
+    const orbit = d.deviceRotationDeg >= ORBIT_DEG;
+    add({
+      id: "camera.depth-device",
+      title: "Phone rotation during head turn",
+      value: `${fmt(d.deviceRotationDeg, 1)}°`,
+      detail: orbit
+        ? "The phone itself rotated about as much as the face appeared to — the camera may have been swung around a static head model instead of a person turning."
+        : "The gyroscope shows the phone stayed steady while the head turned: the motion came from the person, not the camera.",
+      status: orbit ? "warn" : "pass",
+      cameraEvidence: orbit ? { physical: -0.3 } : { physical: 0.3 },
+    });
+  }
+}

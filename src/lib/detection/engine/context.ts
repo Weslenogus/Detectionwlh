@@ -1,3 +1,4 @@
+import { analyzeActive3d, type Active3DAnalysis } from "../camera/liveness3d";
 import { analyzeInteraction, type InteractionAnalysis } from "../interaction/analysis";
 import { classifyGpu, classifyWebGpuVendor, type GpuClass, type GpuInfo } from "../knowledge/gpu";
 import { isMobileOS, parseUA, type Engine, type ParsedUA } from "../knowledge/ua";
@@ -26,6 +27,8 @@ export interface Ctx {
   cpuArch: "x86" | "arm" | "unknown";
   motion: MotionAnalysis;
   interaction: InteractionAnalysis;
+  /** Active 3D head-turn analysis (null when the challenge was not issued). */
+  depth: Active3DAnalysis | null;
 }
 
 function safely<T>(fn: () => T, fallback: () => T): T {
@@ -74,6 +77,13 @@ export function buildContext(bundle: SignalBundle): Ctx {
     cpuArch,
     motion: safely(() => analyzeMotion(bundle.motion), () => analyzeMotion(null)),
     interaction: safely(() => analyzeInteraction(bundle.interaction), () => analyzeInteraction(null)),
+    depth: safely(
+      () => {
+        const a = bundle.camera?.active3d;
+        return a ? analyzeActive3d(a, Array.isArray(a.challenge) ? a.challenge : [], bundle.motion) : null;
+      },
+      () => null,
+    ),
   };
 }
 

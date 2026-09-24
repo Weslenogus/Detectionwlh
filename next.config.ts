@@ -31,7 +31,7 @@ const nextConfig: NextConfig = {
           { key: "Accept-CH", value: ACCEPT_CH },
           {
             key: "Permissions-Policy",
-            value: "camera=(self), microphone=(), geolocation=(), accelerometer=(self), gyroscope=(self), magnetometer=(self)",
+            value: "camera=(self), microphone=(), geolocation=(self), accelerometer=(self), gyroscope=(self), magnetometer=(self)",
           },
           { key: "X-Content-Type-Options", value: "nosniff" },
           { key: "Referrer-Policy", value: "no-referrer" },

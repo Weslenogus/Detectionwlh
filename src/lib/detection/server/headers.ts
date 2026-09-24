@@ -42,20 +42,37 @@ export function isPrivateIp(ip: string): boolean {
   return false;
 }
 
+function safeDecode(v: string | null): string | undefined {
+  if (!v) return undefined;
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return v;
+  }
+}
+
+
 export function extractServerSignals(headers: Headers): ServerSignals {
   const h: Record<string, string> = {};
   for (const k of KEEP) {
     const v = headers.get(k);
     if (v) h[k] = v.slice(0, 512);
   }
-  const fwd = headers.get("x-forwarded-for")?.split(",")[0]?.trim() || headers.get("x-real-ip") || headers.get("cf-connecting-ip") || null;
+  // Proxy-set headers are trusted by default (Vercel, Cloudflare, nginx). When the app is exposed
+  // directly to clients set TRUST_PROXY_HEADERS=false: they could otherwise spoof their address.
+  const trust = process.env.TRUST_PROXY_HEADERS !== "false";
+  const fwd = trust
+    ? headers.get("cf-connecting-ip") || headers.get("x-real-ip") || headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null
+    : null;
   const ip = fwd ? fwd.replace(/^\[|\]$/g, "") : null;
   const ipVersion = ip ? (ip.includes(":") && !ip.startsWith("::ffff:") ? 6 : 4) : null;
   const geo = {
     country: headers.get("x-vercel-ip-country") ?? headers.get("cf-ipcountry") ?? undefined,
     region: headers.get("x-vercel-ip-country-region") ?? undefined,
-    city: headers.get("x-vercel-ip-city") ? decodeURIComponent(headers.get("x-vercel-ip-city")!) : undefined,
+    city: safeDecode(headers.get("x-vercel-ip-city")),
     timezone: headers.get("x-vercel-ip-timezone") ?? headers.get("cf-timezone") ?? undefined,
+    lat: parseFloat(headers.get("x-vercel-ip-latitude") ?? headers.get("cf-iplatitude") ?? "") || undefined,
+    lon: parseFloat(headers.get("x-vercel-ip-longitude") ?? headers.get("cf-iplongitude") ?? "") || undefined,
   };
   const ja4 = headers.get("x-vercel-ja4-digest") ?? headers.get("cf-ja4") ?? undefined;
   const ja3 = headers.get("cf-ja3-hash") ?? undefined;

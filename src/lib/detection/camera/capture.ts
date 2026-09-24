@@ -4,8 +4,10 @@ import { isNativeMediaFn, listDevices, plainCaps, shortHash } from "./devices";
 import { detectFaces } from "./face";
 import { analyzeFlash, FLASH_COLORS } from "./flash";
 import { analyzeFrames, frameTiming, type RawFrame } from "./frame-analysis";
+import type { PoseDir } from "./liveness3d";
+import { runPoseChallenge, type PoseProgress } from "./pose-challenge";
 
-export type CameraPhase = "requesting" | "warming" | "capturing" | "rear" | "analyzing" | "done" | "error";
+export type CameraPhase = "requesting" | "warming" | "capturing" | "pose" | "rear" | "analyzing" | "done" | "error";
 
 export interface CameraTestOptions {
   video: HTMLVideoElement;
@@ -14,7 +16,13 @@ export interface CameraTestOptions {
   captureMs?: number;
   warmupMs?: number;
   probeRear?: boolean;
+  /** Server-issued head-turn order for the active 3D liveness check; omitted/empty skips it. */
+  pose?: PoseDir[];
+  poseTimeoutMs?: number;
+  onPose?: (p: PoseProgress) => void;
   onPhase?: (phase: CameraPhase, detail?: { progress?: number; message?: string; facing?: "front" | "rear" }) => void;
+  /** Returns true once the caller no longer wants the result (e.g. component unmounted). */
+  isCancelled?: () => boolean;
 }
 
 export interface CameraTestResult {
@@ -226,8 +234,15 @@ function stopStream(stream: MediaStream | null) {
   stream?.getTracks().forEach((t) => attempt(() => t.stop(), undefined));
 }
 
+/** getUserMedia with a timeout that never leaks: a stream that arrives late is stopped immediately. */
 async function openStream(constraints: MediaStreamConstraints, timeoutMs: number) {
-  return withTimeout(navigator.mediaDevices.getUserMedia(constraints), timeoutMs, "getUserMedia");
+  const p = navigator.mediaDevices.getUserMedia(constraints);
+  try {
+    return await withTimeout(p, timeoutMs, "getUserMedia");
+  } catch (e) {
+    p.then(stopStream, () => undefined);
+    throw e;
+  }
 }
 
 async function attach(video: HTMLVideoElement, stream: MediaStream) {
@@ -304,7 +319,12 @@ export async function runCameraTest(opts: CameraTestOptions): Promise<CameraTest
     rear: null,
     challengeSequence: opts.sequence,
   };
-  if (!signals.supported) return { signals, snapshot: null };
+  if (!signals.supported) {
+    signals.error = window.isSecureContext ? "navigator.mediaDevices.getUserMedia is not available" : "Camera requires HTTPS (insecure origin)";
+    phase("error", { message: signals.error });
+    return { signals, snapshot: null };
+  }
+  const cancelled = () => opts.isCancelled?.() === true;
 
   signals.devicesBefore = await listDevices();
   let stream: MediaStream | null = null;
@@ -318,6 +338,7 @@ export async function runCameraTest(opts: CameraTestOptions): Promise<CameraTest
       30000,
     );
     signals.permission = "granted";
+    if (cancelled()) throw new Error("cancelled");
     const openMs = Math.round(performance.now() - t0);
     const track = stream.getVideoTracks()[0];
     await attach(video, stream);
@@ -332,13 +353,35 @@ export async function runCameraTest(opts: CameraTestOptions): Promise<CameraTest
     const win = await captureWindow(video, captureMs, {
       sequence: opts.sequence,
       setFlash: opts.setFlash,
-      faces: 4,
+      faces: 5,
       onProgress: (p) => phase("capturing", { progress: Math.min(1, p), facing: "front" }),
     });
     opts.setFlash(null);
     faceCanvases = win.faceCanvases;
     const photo = await photoCapabilities(track);
     signals.front = buildCapture("front", track, video, win, { openMs, firstFrameMs, captureMs }, photo, opts.sequence);
+    // Enumerate while the stream is live: Firefox only exposes labels/ids during capture.
+    signals.devicesAfter = await listDevices();
+
+    // Active 3D liveness on the same live stream: turn the head as instructed.
+    if (opts.pose?.length && !cancelled()) {
+      phase("pose", { facing: "front" });
+      signals.active3d = await runPoseChallenge(video, opts.pose, (p) => opts.onPose?.(p), {
+        timeoutMs: opts.poseTimeoutMs,
+        isCancelled: cancelled,
+      }).catch((e) => ({
+        status: "error" as const,
+        error: errorMessage(e),
+        challenge: opts.pose ?? [],
+        achieved: [],
+        window: null,
+        frames: 0,
+        track: [],
+        keyFrames: { frontal: null, left: null, right: null },
+      }));
+    } else {
+      signals.active3d = { status: "skipped", challenge: [], achieved: [], window: null, frames: 0, track: [], keyFrames: { frontal: null, left: null, right: null } };
+    }
   } catch (e) {
     opts.setFlash(null);
     signals.permission = signals.permission === "granted" ? "error" : classifyError(e);
@@ -349,9 +392,9 @@ export async function runCameraTest(opts: CameraTestOptions): Promise<CameraTest
     video.srcObject = null;
   }
 
-  signals.devicesAfter = await listDevices();
+  if (!signals.devicesAfter.length) signals.devicesAfter = await listDevices();
 
-  if (signals.permission === "granted" && opts.probeRear !== false) {
+  if (signals.permission === "granted" && opts.probeRear !== false && !cancelled()) {
     const videoInputs = signals.devicesAfter.filter((d) => d.kind === "videoinput");
     const hasOther = videoInputs.length > 1 || videoInputs.some((d) => d.facingMode?.includes("environment"));
     if (hasOther) {

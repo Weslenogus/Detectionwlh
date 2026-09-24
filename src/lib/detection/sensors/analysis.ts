@@ -24,6 +24,8 @@ export interface MotionAnalysis {
   gravityPlausible: boolean | null;
   noise: number | null;
   roughness: number | null;
+  /** Deviation of each sample from the midpoint of its neighbours: ≈0 only for generated curves. */
+  jitter: number | null;
   quantum: number | null;
   /** Every value is a multiple of 0.1 (Chromium's anti-fingerprinting rounding). */
   coarse: boolean | null;
@@ -95,6 +97,7 @@ export function analyzeMotion(input: MotionSignals | null | undefined): MotionAn
     gravityPlausible: null,
     noise: null,
     roughness: null,
+    jitter: null,
     quantum: null,
     coarse: null,
     static: null,
@@ -146,7 +149,9 @@ export function analyzeMotion(input: MotionSignals | null | undefined): MotionAn
     return out;
   }
   if (src.length === 0 && ori.length === 0 && out.generic.accelerometer.samples === 0) {
-    out.verdict = (m.motionNullEvents ?? 0) + (m.orientationNullEvents ?? 0) > 0 ? "null-sensors" : "absent";
+    // Chromium also sends all-null events when the user blocked motion sensors for the site.
+    const blocked = m.accelerometer?.state === "denied" || m.gyroscope?.state === "denied";
+    out.verdict = blocked ? "denied" : (m.motionNullEvents ?? 0) + (m.orientationNullEvents ?? 0) > 0 ? "null-sensors" : "absent";
     return out;
   }
 
@@ -171,6 +176,7 @@ export function analyzeMotion(input: MotionSignals | null | undefined): MotionAn
     });
     const rs = r.filter((x): x is number => x !== null);
     out.roughness = rs.length ? median(rs) : null;
+    out.jitter = median(axes.map((a) => std(a.slice(1, -1).map((v, i) => v - (a[i] + a[i + 2]) / 2))));
 
     if (off === 4) {
       const mags = src.map((s) => Math.hypot(s[4] as number, s[5] as number, s[6] as number));
@@ -222,7 +228,9 @@ export function analyzeMotion(input: MotionSignals | null | undefined): MotionAn
     out.verdict = out.coarse ? "resting" : "synthetic";
     if (out.orientationRoundPreset) out.verdict = "synthetic";
   } else if (src.length >= 15) {
-    const smoothScripted = out.roughness !== null && out.roughness < 0.25 && !out.coarse;
+    // Full-precision data with no sample-to-sample jitter is a generated curve; real MEMS noise
+    // is orders of magnitude larger than 0.002 m/s² even while walking.
+    const smoothScripted = !out.coarse && out.jitter !== null && out.jitter < 0.002;
     if (smoothScripted) out.verdict = "synthetic";
     else if (out.gravityPlausible === false) out.verdict = "synthetic";
     else out.verdict = "physical";

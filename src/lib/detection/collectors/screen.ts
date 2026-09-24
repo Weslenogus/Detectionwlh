@@ -93,6 +93,7 @@ export async function collectScreen(): Promise<ScreenSignals> {
     safeArea: attempt(measureSafeArea, { top: 0, right: 0, bottom: 0, left: 0 }),
     media,
     refreshRate: await measureRefreshRate(),
+    isExtended: attempt(() => (typeof (screen as unknown as { isExtended?: boolean }).isExtended === "boolean" ? (screen as unknown as { isExtended: boolean }).isExtended : null), null),
   };
 }
 

@@ -7,8 +7,18 @@ import { collectIntegrity } from "./collectors/integrity";
 import { collectNavigator } from "./collectors/navigator";
 import { collectPlatformApis } from "./collectors/platform";
 import { collectScreen, collectTouch } from "./collectors/screen";
+import { collectHostOs } from "./collectors/host-os";
+import { collectMediaCaps } from "./collectors/media-caps";
+import { collectBotd, collectFpjs, collectPrivacy } from "./collectors/third-party";
+import { collectTimezone } from "./collectors/timezone";
+import { collectWebRtc } from "./collectors/webrtc";
 import type {
   AutomationSignals,
+  BotdSignals,
+  FpjsSignals,
+  HostOsSignals,
+  PrivacySignals,
+  TimezoneSignals,
   CpuSignals,
   DeviceSignals,
   EnvironmentSignals,
@@ -32,8 +42,11 @@ export type ScanStepId =
   | "webgpu"
   | "platform"
   | "fingerprint"
+  | "media"
   | "environment"
+  | "network"
   | "automation"
+  | "privacy"
   | "integrity"
   | "sensors";
 
@@ -44,10 +57,13 @@ export const SCAN_STEPS: { id: ScanStepId; label: string; hint: string }[] = [
   { id: "gpu", label: "GPU pipeline & shader precision", hint: "Renderer, extensions, measured mediump mantissa bits" },
   { id: "webgpu", label: "WebGPU adapter", hint: "Adapter vendor / architecture cross-check" },
   { id: "platform", label: "Platform-exclusive APIs", hint: "APIs compiled only into Android, iOS or desktop builds" },
-  { id: "fingerprint", label: "Fonts, voices, audio & canvas", hint: "Host-OS markers and rendering fingerprints" },
-  { id: "environment", label: "Network, power & media devices", hint: "Connection type, battery, cameras present" },
-  { id: "automation", label: "Automation & headless checks", hint: "WebDriver, CDP, injected globals" },
-  { id: "integrity", label: "Tamper & cross-realm verification", hint: "Native-code checks, iframe and worker re-reads" },
+  { id: "fingerprint", label: "Host OS text stack & fingerprints", hint: "system-ui font, emoji, fonts, voices, audio, canvas" },
+  { id: "media", label: "Hardware media engines", hint: "H.264/HEVC/VP9/AV1 decoders, WebRTC codecs" },
+  { id: "environment", label: "Power, clock & media devices", hint: "Battery, connection, timezone consistency, cameras" },
+  { id: "network", label: "Network path (WebRTC STUN)", hint: "Public UDP address vs HTTP address" },
+  { id: "automation", label: "Automation & bot detection", hint: "WebDriver, CDP, injected globals, BotD" },
+  { id: "privacy", label: "Private mode & device ID", hint: "Incognito detection, FingerprintJS visitor ID" },
+  { id: "integrity", label: "Tamper & cross-realm verification", hint: "Native code, iframe, sandbox, worker, service worker" },
   { id: "sensors", label: "Motion sensors", hint: "Accelerometer / gyroscope noise and gravity" },
 ];
 
@@ -190,6 +206,10 @@ export async function runDeviceScan(opts: ScanOptions = {}): Promise<DeviceSigna
     }
   }
 
+  // Slow, network-bound probes run in the background while the rest executes.
+  const webrtcP = collectWebRtc();
+  const fpjsP = collectFpjs();
+
   const nav = await step("identity", collectNavigator, EMPTY_NAV, (n) =>
     n.uaData?.high?.model ? `${n.uaData.platform} · ${n.uaData.high.model}` : n.platform,
   );
@@ -205,12 +225,40 @@ export async function runDeviceScan(opts: ScanOptions = {}): Promise<DeviceSigna
     g.adapter ? `${g.adapter.vendor || "unknown"} · ${g.adapter.architecture || "?"}` : g.supported ? "no adapter" : "not supported",
   );
   const platformApis = await step("platform", collectPlatformApis, () => ({}), (p) => `${Object.values(p).filter(Boolean).length} APIs exposed`);
-  const fp = await step("fingerprint", collectFingerprint, EMPTY_FP, (f) => `${f.fonts.length} fonts · ${f.voices.count} voices`);
-  const env = await step("environment", collectEnvironment, EMPTY_ENV, (e) =>
-    [e.connection.type ?? e.connection.effectiveType, e.mediaDevicesPre ? `${e.mediaDevicesPre.videoinput} camera(s)` : null].filter(Boolean).join(" · "),
+  const { fp, hostOs } = await step(
+    "fingerprint",
+    async () => ({ fp: await collectFingerprint(), hostOs: collectHostOs() as HostOsSignals | undefined }),
+    () => ({ fp: EMPTY_FP(), hostOs: undefined }),
+    (v) => `system-ui → ${v.hostOs?.systemUiFont ?? "unknown"} · ${v.fp.fonts.length} fonts · ${v.fp.voices.count} voices`,
   );
-  const automation = await step("automation", collectAutomation, EMPTY_AUTOMATION, (a) =>
-    a.webdriver ? "webdriver flag set" : a.knownGlobals.length ? `${a.knownGlobals.length} markers` : "clean",
+  const mediaCaps = await step("media", collectMediaCaps, () => undefined, (m) => {
+    const h = m?.decode["h264-1080p"];
+    return h ? `H.264 ${h.powerEfficient ? "hardware" : "software"} · ${m?.rtcVideoCodecs.length ?? 0} RTC codecs` : "not exposed";
+  });
+  const { env, timezone } = await step(
+    "environment",
+    async () => ({ env: await collectEnvironment(), timezone: collectTimezone() as TimezoneSignals | undefined }),
+    () => ({ env: EMPTY_ENV(), timezone: undefined }),
+    (v) =>
+      [v.env.connection.type ?? v.env.connection.effectiveType, v.env.mediaDevicesPre ? `${v.env.mediaDevicesPre.videoinput} camera(s)` : null, v.timezone?.zone]
+        .filter(Boolean)
+        .join(" · "),
+  );
+  const webrtc = await step("network", () => webrtcP, () => undefined, (w) =>
+    w?.srflxIps.length ? `public UDP ${w.srflxIps[0]}` : w?.supported ? `no STUN reply (${w.candidateTypes.join(", ") || "blocked"})` : "WebRTC unavailable",
+  );
+  const { automation, botd } = await step(
+    "automation",
+    async () => ({ automation: await collectAutomation(), botd: (await collectBotd()) as BotdSignals | undefined }),
+    () => ({ automation: EMPTY_AUTOMATION(), botd: undefined }),
+    (v) =>
+      v.automation.webdriver ? "webdriver flag set" : v.botd?.bot ? `BotD: ${v.botd.kind}` : v.automation.knownGlobals.length ? `${v.automation.knownGlobals.length} markers` : "clean",
+  );
+  const { privacy, fpjs } = await step(
+    "privacy",
+    async () => ({ privacy: (await collectPrivacy()) as PrivacySignals | undefined, fpjs: (await fpjsP) as FpjsSignals | undefined }),
+    () => ({ privacy: undefined, fpjs: undefined }),
+    (v) => `${v.privacy?.incognito ? "private window" : v.privacy?.incognito === false ? "normal window" : "mode unknown"} · ID ${v.fpjs?.visitorId?.slice(0, 8) ?? "n/a"}`,
   );
   const integrity = await step(
     "integrity",
@@ -226,8 +274,11 @@ export async function runDeviceScan(opts: ScanOptions = {}): Promise<DeviceSigna
       }),
     EMPTY_INTEGRITY,
     (i) => {
-      const bad = i.checks.filter((c) => !c.ok).length + i.worker.mismatches.length + i.iframe.mismatches.length;
-      return bad ? `${bad} anomalies` : `${i.checks.length} APIs verified native`;
+      const realms = [i.iframe, i.worker, i.sandbox, i.serviceWorker].filter((r) => r?.ok).length;
+      const bad =
+        i.checks.filter((c) => !c.ok).length +
+        [i.iframe, i.worker, i.sandbox, i.serviceWorker].reduce((n, r) => n + (r?.mismatches.length ?? 0), 0);
+      return bad ? `${bad} anomalies` : `${i.checks.length} APIs native · ${realms} realms agree`;
     },
   );
   await step(
@@ -273,6 +324,13 @@ export async function runDeviceScan(opts: ScanOptions = {}): Promise<DeviceSigna
     automation,
     fingerprint,
     environment: env,
+    hostOs,
+    timezone,
+    mediaCaps,
+    webrtc,
+    privacy,
+    botd,
+    fpjs,
     errors,
     timings,
   };

@@ -54,34 +54,35 @@ export function integrityRules(c: Ctx, add: Add) {
     });
   }
 
-  if (i.iframe?.ok) {
-    const mm = i.iframe.mismatches ?? [];
-    add({
-      id: "integrity.iframe",
-      title: "Cross-realm re-read (iframe)",
-      value: mm.length ? `mismatch: ${list(mm)}` : "consistent",
-      detail: mm.length ? "A fresh iframe sees different identity values than the page — spoofing applied to the top frame only." : "A fresh browsing context reports the same identity.",
-      status: mm.length ? "fail" : "pass",
-      evidence: mm.length ? { spoofed: 3.0, phone: -2.0, tablet: -2.0 } : { spoofed: -0.3 },
-    });
-  }
-  if (i.worker?.ok) {
-    const mm = i.worker.mismatches ?? [];
+  // WebKit may not apply the iPad/desktop-mode "MacIntel" platform override inside every realm,
+  // so a platform-only difference on Apple devices is not treated as tampering.
+  const apple = c.engine === "WebKit" || c.claims.ios || c.claims.macTouch;
+  const realms: { key: string; title: string; realm: typeof i.worker | undefined; hint: string }[] = [
+    { key: "iframe", title: "Cross-realm re-read (iframe)", realm: i.iframe, hint: "A fresh same-origin iframe" },
+    { key: "worker", title: "Cross-realm re-read (Web Worker)", realm: i.worker, hint: "A dedicated Web Worker" },
+    { key: "sandbox", title: "Cross-realm re-read (sandboxed iframe)", realm: i.sandbox, hint: "An opaque-origin sandboxed iframe" },
+    { key: "serviceWorker", title: "Cross-realm re-read (service worker)", realm: i.serviceWorker, hint: "A service worker" },
+  ];
+  for (const { key, title, realm, hint } of realms) {
+    if (!realm) continue;
+    if (!realm.ok) {
+      add({ id: `integrity.${key}`, title, value: "unavailable", detail: realm.error ?? "Realm could not be created.", status: "info" });
+      continue;
+    }
+    const mm = (realm.mismatches ?? []).filter((m) => !(apple && m === "platform"));
     const identity = mm.filter((m) => IDENTITY_MISMATCH.has(m));
     add({
-      id: "integrity.worker",
-      title: "Cross-realm re-read (Web Worker)",
+      id: `integrity.${key}`,
+      title,
       value: mm.length ? `mismatch: ${list(mm)}` : "consistent",
       detail: identity.length
-        ? "A Web Worker — which spoofing scripts rarely reach — reports a different device identity."
+        ? `${hint} — which spoofing scripts frequently fail to reach — reports a different device identity.`
         : mm.length
-          ? "Minor worker-side differences (GPU/timezone/memory)."
-          : "The worker thread independently confirms UA, platform, cores, GPU and CPU architecture.",
+          ? "Minor differences (GPU string, timezone or memory)."
+          : `${hint} independently confirms UA, platform, cores, GPU and CPU architecture.`,
       status: identity.length ? "fail" : mm.length ? "warn" : "pass",
-      evidence: identity.length ? { spoofed: 3.0, phone: -2.5, tablet: -2.0 } : mm.length ? { spoofed: 1.0 } : { phone: 0.2, tablet: 0.2, spoofed: -0.5 },
+      evidence: identity.length ? { spoofed: 3.0, phone: -2.5, tablet: -2.0 } : mm.length ? { spoofed: 0.8 } : { phone: 0.15, tablet: 0.15, spoofed: -0.4 },
     });
-  } else if (i.worker && !i.worker.ok) {
-    add({ id: "integrity.worker", title: "Cross-realm re-read (Web Worker)", value: "unavailable", detail: i.worker.error ?? "Worker could not start.", status: "info" });
   }
 
   const canvasNoise = i.canvasStable === false || i.canvasPixelExact === false;

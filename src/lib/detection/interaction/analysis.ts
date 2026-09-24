@@ -49,7 +49,9 @@ export function analyzeInteraction(s: InteractionSignals | null | undefined): In
     (s.pointers ?? []).filter((p) => !p.isTrusted).length +
     (s.touches ?? []).filter((t) => !t.isTrusted).length +
     (s.clicks ?? []).filter((c) => !c.isTrusted).length;
-  out.programmaticClicks = (s.clicks ?? []).filter((c) => !c.isTrusted || !c.precededByPointerDown).length;
+  // Only untrusted clicks are "programmatic": VoiceOver/TalkBack/Switch Control and keyboard
+  // activation legitimately produce trusted clicks without a preceding pointerdown.
+  out.programmaticClicks = (s.clicks ?? []).filter((c) => !c.isTrusted).length;
   out.trustedClicks = (s.clicks ?? []).filter((c) => c.isTrusted && c.precededByPointerDown).length;
 
   const touchDowns = downs.filter((p) => p.pointerType === "touch");
