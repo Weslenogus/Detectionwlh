@@ -1,0 +1,171 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens. Light is the base; dark is selected (its own steps, validated
+ * against the dark surface) via the OS setting or an explicit data-theme.
+ * Chart series use the validated categorical slots 1–2; status colours are
+ * reserved for pass / warn / fail and always ship with an icon + label.
+ */
+:root {
+  color-scheme: light;
+  --page: #f4f5f7;
+  --surface: #ffffff;
+  --surface-2: #f0f1f4;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #7b7973;
+  --line: #e3e4e8;
+  --grid: #e8e7e1;
+  --axis: #c3c2b7;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --accent: #2a78d6;
+  --accent-ink: #ffffff;
+  --accent-track: #dbe8fb;
+  --good: #0ca30c;
+  --good-ink: #006300;
+  --good-wash: rgba(12, 163, 12, 0.1);
+  --warn: #fab219;
+  --warn-ink: #7a4f00;
+  --warn-wash: rgba(250, 178, 25, 0.14);
+  --bad: #d03b3b;
+  --bad-ink: #a51f1f;
+  --bad-wash: rgba(208, 59, 59, 0.1);
+  --info-wash: rgba(42, 120, 214, 0.08);
+  --band: rgba(11, 11, 11, 0.07);
+  --ring: rgba(11, 11, 11, 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0b0d10;
+    --surface: #14171c;
+    --surface-2: #1b1f26;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #8f8d86;
+    --line: #262a31;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --accent: #3987e5;
+    --accent-ink: #ffffff;
+    --accent-track: #1b283a;
+    --good: #0ca30c;
+    --good-ink: #3fcf5a;
+    --good-wash: rgba(12, 163, 12, 0.16);
+    --warn: #fab219;
+    --warn-ink: #fab219;
+    --warn-wash: rgba(250, 178, 25, 0.14);
+    --bad: #d03b3b;
+    --bad-ink: #ff7a7a;
+    --bad-wash: rgba(208, 59, 59, 0.18);
+    --info-wash: rgba(57, 135, 229, 0.12);
+    --band: rgba(255, 255, 255, 0.08);
+    --ring: rgba(255, 255, 255, 0.1);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0b0d10;
+  --surface: #14171c;
+  --surface-2: #1b1f26;
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --muted: #8f8d86;
+  --line: #262a31;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --accent: #3987e5;
+  --accent-ink: #ffffff;
+  --accent-track: #1b283a;
+  --good-ink: #3fcf5a;
+  --good-wash: rgba(12, 163, 12, 0.16);
+  --warn-ink: #fab219;
+  --bad-ink: #ff7a7a;
+  --bad-wash: rgba(208, 59, 59, 0.18);
+  --info-wash: rgba(57, 135, 229, 0.12);
+  --band: rgba(255, 255, 255, 0.08);
+  --ring: rgba(255, 255, 255, 0.1);
+}
+
+@theme inline {
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-track: var(--accent-track);
+  --color-good: var(--good);
+  --color-good-ink: var(--good-ink);
+  --color-good-wash: var(--good-wash);
+  --color-warn: var(--warn);
+  --color-warn-ink: var(--warn-ink);
+  --color-warn-wash: var(--warn-wash);
+  --color-bad: var(--bad);
+  --color-bad-ink: var(--bad-ink);
+  --color-bad-wash: var(--bad-wash);
+  --color-info-wash: var(--info-wash);
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+html,
+body {
+  background: var(--page);
+  color: var(--ink);
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes scan-sweep {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+}
+
+.animate-sweep {
+  animation: scan-sweep 2.4s linear infinite;
+}
+
+.animate-pulse-ring {
+  animation: pulse-ring 1.8s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-sweep,
+  .animate-pulse-ring {
+    animation: none;
+  }
+}
