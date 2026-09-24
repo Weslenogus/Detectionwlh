@@ -522,6 +522,34 @@ export interface FrameAggregate {
   moire?: { peakRatio: number; frequency: number; suspicious: boolean } | null;
 }
 
+export interface NoiseTile {
+  c: number;
+  r: number;
+  /** static = bit-identical frame to frame; live = fresh noise / motion; clipped = too dark/bright to judge. */
+  state: "static" | "live" | "mixed" | "clipped";
+  /** Median share of pixels that changed by exactly the tile's most common amount (1 = no per-pixel noise). */
+  zero: number | null;
+  sigma: number | null;
+  luma: number;
+  /** Spatial luma σ inside the tile (how much detail it has). */
+  texture: number;
+}
+
+/** Temporal-noise map over a grid of native-resolution tiles covering the whole frame. */
+export interface NoiseMap {
+  cols: number;
+  rows: number;
+  size: number;
+  pairs: number;
+  duplicatePairs: number;
+  live: number;
+  static: number;
+  staticTextured: number;
+  /** composite = detailed regions frozen while the rest is live (pasted overlay); static = whole image frozen. */
+  verdict: "sensor" | "composite" | "static" | "inconclusive" | "insufficient";
+  tiles: NoiseTile[];
+}
+
 export interface FlashSegment {
   color: FlashColor;
   start: number;
@@ -591,6 +619,8 @@ export interface CameraCapture {
   };
   metrics: FrameMetric[];
   aggregate: FrameAggregate | null;
+  /** Whole-frame temporal-noise map (front camera). */
+  noiseMap?: NoiseMap | null;
   flash: FlashResponse | null;
   face: FaceSignals | null;
   trackStats: Record<string, number> | null;

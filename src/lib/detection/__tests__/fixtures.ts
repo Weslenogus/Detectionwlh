@@ -12,6 +12,8 @@ import type {
   FrameMetric,
   InteractionSignals,
   MotionSample,
+  NoiseMap,
+  NoiseTile,
   MotionSignals,
   OrientationSample,
   SignalBundle,
@@ -573,6 +575,53 @@ export function obsCamera(): CameraSignals {
   c.devicesAfter = [{ kind: "videoinput", label: "OBS Virtual Camera", deviceId: "dev-front", groupId: "g" }];
   c.rear = null;
   c.rearError = "No second camera enumerated";
+  return c;
+}
+
+/** Noise-map tile statistics: "sensor" = live everywhere, "composite" = detailed regions frozen, "static" = still image. */
+export function noiseMapFixture(kind: "sensor" | "composite" | "static"): NoiseMap {
+  const r = rng(9);
+  const tiles: NoiseTile[] = Array.from({ length: 24 }, (_, i) => {
+    const pasted = kind === "static" || (kind === "composite" && [18, 19, 20].includes(i)); // bottom-left ID card
+    const zero = pasted ? 1 : 0.25 + r() * 0.2;
+    return { c: i % 6, r: Math.floor(i / 6), state: pasted ? "static" : "live", zero, sigma: pasted ? 0 : 1.2, luma: 90 + Math.round(r() * 80), texture: pasted ? 22 : 12 };
+  });
+  return { cols: 6, rows: 4, size: 24, pairs: 28, duplicatePairs: kind === "static" ? 0 : 1, live: 0, static: 0, staticTextured: 0, verdict: "sensor", tiles };
+}
+
+/**
+ * OBS Virtual Camera renamed to an Android lens name ("camera2 1, facing front"), as an attacker
+ * does with OBS / v4l2loopback card_label. "still": the scene is a photo of an ID card next to a
+ * face; "relay": OBS relays the attacker's real webcam (real sensor noise, reflects the screen
+ * flash, a real 3D head) with a doctored ID card pasted into the scene.
+ */
+export function obsRenamedAsPhone(kind: "still" | "relay"): CameraSignals {
+  const c = physicalCamera("android");
+  const f = c.front!;
+  f.label = "camera2 1, facing front";
+  f.settings = { deviceId: "dev-front", width: 1280, height: 720, frameRate: 30, aspectRatio: 1.7777, resizeMode: "none" };
+  f.capabilities = { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 60 }, aspectRatio: {}, resizeMode: ["none", "crop-and-scale"] };
+  f.photoCapabilities = null;
+  f.videoWidth = 1280;
+  f.videoHeight = 720;
+  f.timing = { ...f.timing, intervalStd: 0.3, intervalCv: 0.009 };
+  c.devicesAfter = [{ kind: "videoinput", label: "camera2 1, facing front", deviceId: "dev-front", groupId: "g" }];
+  c.rear = null;
+  c.rearError = "No second camera enumerated";
+  f.face = { ...f.face!, maxFaces: 2 };
+  if (kind === "still") {
+    f.aggregate = { ...f.aggregate!, duplicateRatio: 1, temporalNoise: 0, zeroDiffRatio: 1, noiseIntensityCorr: null, noiseByIntensity: [] };
+    f.metrics = f.metrics.map((m) => ({ ...m, r: 100, g: 100, b: 100, diff: 0, zeroDiff: 1, temporalSigma: 0 }));
+    f.flash = analyzeFlash(f.metrics, ["red", "blue", "green", "red"], f.flash!.schedule);
+    f.noiseMap = noiseMapFixture("static");
+    c.active3d = { ...headTurn("flat"), others: [] };
+  } else {
+    f.noiseMap = noiseMapFixture("composite");
+    const turn = headTurn("live", ["left", "right"]);
+    // The pasted ID-card face: a third of the size, pixel-frozen, never turns.
+    turn.others = turn.track.map((t) => [t.t, 0.2, 0.75, 0.1, 0.012]);
+    c.active3d = turn;
+  }
   return c;
 }
 

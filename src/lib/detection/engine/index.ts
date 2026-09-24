@@ -27,7 +27,7 @@ import { buildContext, makeCollector, type Add, type Ctx } from "./context";
 import { buildProfile, deviceName } from "./profile";
 import { behaviorRules, botdRules, hostOsRules, mediaHardwareRules, networkRules, uaConsistencyRules } from "./rules/advanced";
 import { automationRules } from "./rules/automation";
-import { cameraRules, ORBIT_DEG } from "./rules/camera";
+import { cameraRules, ORBIT_DEG, SECOND_FACE_SHARE } from "./rules/camera";
 import { environmentRules } from "./rules/environment";
 import { graphicsRules } from "./rules/graphics";
 import { hardwareRules } from "./rules/hardware";
@@ -119,6 +119,9 @@ const CAMERA_HEADLINE: Record<CameraClass, string> = {
   synthetic: "Synthetic / emulated camera feed",
 };
 
+/** Failed findings that each rule out "approve" on their own. */
+const APPROVAL_BLOCKERS = new Set(["camera.label-driver", "camera.noise-map", "camera.second-face", "camera.hooked", "camera.depth"]);
+
 function worstStatus(fs: Finding[]): FindingStatus {
   if (fs.some((f) => f.status === "fail")) return "fail";
   if (fs.some((f) => f.status === "warn")) return "warn";
@@ -204,8 +207,13 @@ export function evaluate(bundle: SignalBundle, opts: EvaluateOptions): Report {
   const depthOk =
     !depthRequired ||
     (depth?.verdict === "live-3d" && depth.orderOk === true && (depth.deviceRotationDeg === null || depth.deviceRotationDeg < ORBIT_DEG));
+  // KYC selfies must show exactly one person: a second face (an ID card held up or pasted in, a helper) needs review.
+  const extraFace = (bundle.camera?.front?.face?.maxFaces ?? 0) > 1 || (depth?.secondFace?.share ?? 0) >= SECOND_FACE_SHARE;
+  // Findings that prove the feed is not a plain camera looking at one live person: each one alone
+  // rules out an approval, however strong the rest of the evidence.
+  const blocking = findings.filter((f) => f.status === "fail" && APPROVAL_BLOCKERS.has(f.id));
   let decision: Decision = "review";
-  if (isRealPhone && pPhone >= 0.85 && camOk && depthOk && !hardFail && !presentationAttack) decision = "approve";
+  if (isRealPhone && pPhone >= 0.85 && camOk && depthOk && !extraFace && !blocking.length && !hardFail && !presentationAttack) decision = "approve";
   else if (hardFail || presentationAttack || pPhone < 0.2) decision = "decline";
 
   const camFactor = camTested ? camProbs!.physical : bundle.camera ? 0.5 : 0.85;

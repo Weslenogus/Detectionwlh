@@ -2,7 +2,8 @@
 
 import { FLASH_COLORS } from "@/lib/detection/camera/flash";
 import { baselineOf, DEPTH_SLOPE_LIVE, TURN_THRESHOLD } from "@/lib/detection/camera/liveness3d";
-import type { CameraSignals, FlashColor, FrameMetric, Report } from "@/lib/detection/types";
+import { noiseVerdict, tileState } from "@/lib/detection/camera/frame-analysis";
+import type { CameraSignals, FlashColor, FrameMetric, NoiseMap, NoiseTile, Report } from "@/lib/detection/types";
 import { LineChart } from "../charts/LineChart";
 import { Card, KV, pct, StatusPill } from "../ui";
 import { CAMERA_LABELS, ProbBars } from "./Probabilities";
@@ -99,6 +100,8 @@ export function CameraPanel({ report, camera, snapshot }: { report: Report; came
         </div>
       )}
 
+      {f.noiseMap && <NoiseMapView map={f.noiseMap} snapshot={snapshot} />}
+
       <DepthSection report={report} camera={camera} />
 
       {f.metrics.some((m) => m.temporalSigma !== null) && (
@@ -185,6 +188,62 @@ function DepthSection({ report, camera }: { report: Report; camera: CameraSignal
           />
         </div>
       )}
+    </div>
+  );
+}
+
+const TILE_STYLE: Record<NoiseTile["state"], { cell: string; label: string }> = {
+  live: { cell: "bg-good/35 ring-good", label: "fresh sensor noise" },
+  static: { cell: "bg-bad/55 ring-bad", label: "bit-identical (frozen)" },
+  mixed: { cell: "bg-warn/40 ring-warn", label: "partly frozen" },
+  clipped: { cell: "bg-black/30 ring-white/40", label: "too dark / bright" },
+};
+
+const NOISE_TEXT: Record<NoiseMap["verdict"], string> = {
+  sensor: "Every region carries fresh sensor noise, as a physical camera produces.",
+  composite: "Detailed regions stayed bit-identical while the rest was live: something was pasted into the feed.",
+  static: "Nothing in the frame changed between frames: a still image.",
+  inconclusive: "Too few usable regions to judge.",
+  insufficient: "Too few frames to judge.",
+};
+
+/** The temporal-noise grid drawn over the camera snapshot, in raw (unmirrored) camera orientation. */
+function NoiseMapView({ map, snapshot }: { map: NoiseMap; snapshot: string | null }) {
+  const v = noiseVerdict(map.tiles, map.pairs, map.duplicatePairs);
+  const states = map.tiles.map((t) => ({ ...t, state: tileState(t) }));
+  const present = (Object.keys(TILE_STYLE) as NoiseTile["state"][]).filter((k) => states.some((t) => t.state === k));
+  return (
+    <div>
+      <h3 className="text-sm font-semibold">Sensor-noise map</h3>
+      <p className="mb-3 text-xs text-muted">
+        {NOISE_TEXT[v.verdict]} {map.cols}×{map.rows} native-resolution regions compared frame to frame over the 1-second capture.
+      </p>
+      <div className="flex flex-wrap items-start gap-4">
+        <div className="relative w-56 shrink-0 overflow-hidden rounded-xl bg-surface-2" style={{ aspectRatio: "4 / 3" }}>
+          {snapshot && (
+            // eslint-disable-next-line @next/next/no-img-element -- local data: URL, never uploaded
+            <img src={snapshot} alt="" className="absolute inset-0 size-full object-cover" />
+          )}
+          <div className="absolute inset-0 grid" style={{ gridTemplateColumns: `repeat(${map.cols}, 1fr)`, gridTemplateRows: `repeat(${map.rows}, 1fr)` }}>
+            {states.map((t) => (
+              <div key={`${t.c}-${t.r}`} className="flex items-center justify-center" style={{ gridColumn: t.c + 1, gridRow: t.r + 1 }}>
+                <span
+                  className={`size-4 rounded-sm ring-1 ${TILE_STYLE[t.state].cell}`}
+                  title={`${TILE_STYLE[t.state].label} · unchanged ${t.zero !== null ? Math.round(t.zero * 100) + "%" : "—"} · σ ${t.sigma ?? "—"}`}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+        <ul className="space-y-1.5 text-xs text-ink-2">
+          {present.map((k) => (
+            <li key={k} className="flex items-center gap-2">
+              <span className={`size-3 rounded-sm ring-1 ${TILE_STYLE[k].cell}`} aria-hidden />
+              {TILE_STYLE[k].label} · {states.filter((t) => t.state === k).length}
+            </li>
+          ))}
+        </ul>
+      </div>
     </div>
   );
 }

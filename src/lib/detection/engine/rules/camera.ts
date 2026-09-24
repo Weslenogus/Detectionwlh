@@ -1,5 +1,6 @@
 import { FLAT_TILT } from "../../camera/liveness3d";
 import { classifyCameraLabel, facingFromLabel, HARDWARE_CAPABILITY_KEYS, hasUsbIds } from "../../knowledge/cameras";
+import { noiseVerdict } from "../../camera/frame-analysis";
 import type { CameraCapture, MediaDeviceRecord } from "../../types";
 import type { Add, Ctx } from "../context";
 import { fmt, list } from "../context";
@@ -110,6 +111,21 @@ export function cameraRules(c: Ctx, add: Add) {
   /* --------------------------- Selected camera ----------------------------- */
   const kind = classifyCameraLabel(f.label);
   const usb = hasUsbIds(f.label);
+  // Chrome on Android builds "camera2 N, facing …" from the same Camera2 LENS_FACING value that
+  // fills facingMode; Safari on iOS always reports facingMode for its lenses. A phone-style name on
+  // a track whose driver knows no lens facing was typed by someone: a renamed OBS / v4l2loopback /
+  // webcam device.
+  const driverFacing = [
+    f.settings?.facingMode,
+    ...(((f.capabilities as Record<string, unknown> | null)?.facingMode as string[] | undefined) ?? []),
+    ...devices.filter((d) => d.label === f.label).flatMap((d) => d.facingMode ?? []),
+  ].filter((v) => typeof v === "string" && v !== "");
+  const phoneEngine = (kind.kind === "android" && c.engine === "Blink") || (kind.kind === "ios" && c.engine === "WebKit");
+  const settingsRead = typeof f.settings?.width === "number" || typeof f.settings?.deviceId === "string";
+  // Only labels that claim a lens direction ("facing front|back", "Front/Back … Camera"); external USB
+  // cameras on Android are legitimately labelled without a facingMode.
+  const claimsFacing = kind.kind === "android" ? /facing (front|back)/i.test(f.label) : /\b(front|back)\b/i.test(f.label);
+  const renamed = (kind.kind === "android" || kind.kind === "ios") && claimsFacing && settingsRead && phoneEngine && !driverFacing.length;
   const labelFinding: Record<string, () => void> = {
     virtual: () =>
       add({
@@ -146,20 +162,20 @@ export function cameraRules(c: Ctx, add: Add) {
         id: "camera.label",
         title: "Active camera",
         value: f.label,
-        detail: "Android Camera2 HAL naming (“camera2 N, facing …”).",
-        status: "pass",
-        evidence: { phone: 1.0, tablet: 0.8, emulator: 0.6, spoofed: -2.0, desktop: -2.0 },
-        cameraEvidence: { physical: 0.8 },
+        detail: renamed ? "Android-style name, but not produced by an Android camera driver (see “Camera name vs driver”)." : "Android Camera2 HAL naming (“camera2 N, facing …”).",
+        status: renamed ? "warn" : "pass",
+        evidence: renamed ? {} : { phone: 1.0, tablet: 0.8, emulator: 0.6, spoofed: -2.0, desktop: -2.0 },
+        cameraEvidence: renamed ? {} : { physical: 0.8 },
       }),
     ios: () =>
       add({
         id: "camera.label",
         title: "Active camera",
         value: f.label,
-        detail: "iOS AVFoundation camera naming.",
-        status: "pass",
-        evidence: { phone: 1.0, tablet: 0.8, emulator: 0.3, spoofed: -2.0, desktop: -1.5 },
-        cameraEvidence: { physical: 0.8 },
+        detail: renamed ? "iPhone-style name, but not produced by an iOS camera driver (see “Camera name vs driver”)." : "iOS AVFoundation camera naming.",
+        status: renamed ? "warn" : "pass",
+        evidence: renamed ? {} : { phone: 1.0, tablet: 0.8, emulator: 0.3, spoofed: -2.0, desktop: -1.5 },
+        cameraEvidence: renamed ? {} : { physical: 0.8 },
       }),
     continuity: () =>
       add({
@@ -194,6 +210,31 @@ export function cameraRules(c: Ctx, add: Add) {
       }),
   };
   (labelFinding[kind.kind] ?? labelFinding.unknown)();
+
+  if ((kind.kind === "android" || kind.kind === "ios") && settingsRead) {
+    if (renamed) {
+      add({
+        id: "camera.label-driver",
+        title: "Camera name vs driver",
+        value: `“${f.label}” · driver reports no lens facing`,
+        detail: `The camera is named like a ${kind.kind === "ios" ? "iPhone" : "Android"} lens, but the capture driver behind it doesn't know which way it faces — ${
+          kind.kind === "ios" ? "Safari" : "Chrome"
+        } derives both from the same hardware property. The device was renamed: a virtual camera (OBS, v4l2loopback) or a webcam dressed up as a phone camera.`,
+        status: "fail",
+        evidence: { spoofed: 1.5, desktop: 0.5, phone: -1.5, tablet: -1.0 },
+        cameraEvidence: { virtual: 3.5, physical: -3.0 },
+      });
+    } else if (driverFacing.length) {
+      add({
+        id: "camera.label-driver",
+        title: "Camera name vs driver",
+        value: `facing ${Array.from(new Set(driverFacing)).join("/")}`,
+        detail: "The lens facing reported by the driver matches the camera's platform naming.",
+        status: "pass",
+        cameraEvidence: { virtual: -0.5 },
+      });
+    }
+  }
 
   const ctor = f.trackConstructor;
   const knownIds = new Set(cam.devicesAfter.map((d) => d.deviceId).filter(Boolean));
@@ -410,6 +451,9 @@ export function cameraRules(c: Ctx, add: Add) {
     }
   }
 
+  /* ------------------------------ Noise map -------------------------------- */
+  noiseMapRules(f, add);
+
   /* -------------------------- Flash challenge ------------------------------ */
   const fl = f.flash;
   if (fl) {
@@ -543,6 +587,8 @@ export { facingOf };
 
 /** Phone rotation (°) during the head turn above which the "turn" may be the camera orbiting a static prop. */
 export const ORBIT_DEG = 25;
+/** Share of challenge frames with a second face before it counts. */
+export const SECOND_FACE_SHARE = 0.2;
 
 function depthRules(c: Ctx, add: Add) {
   const a = c.bundle.camera?.active3d;
@@ -615,6 +661,22 @@ function depthRules(c: Ctx, add: Add) {
     cameraEvidence: d.orderOk ? { injected: -0.3, virtual: -0.3 } : d.reached.length ? { injected: 0.5, virtual: 0.5 } : {},
   });
 
+  const sf = d.secondFace;
+  if (sf && sf.share >= SECOND_FACE_SHARE) {
+    const frozen = sf.motion !== null && sf.motion < 0.0005;
+    add({
+      id: "camera.second-face",
+      title: "Second face in view",
+      value: `${Math.round(sf.share * 100)}% of frames · ${sf.relSize !== null ? `${Math.round(sf.relSize * 100)}% size · ` : ""}moved ${fmt(sf.motion, 4)} · turned ${fmt(sf.noseRange, 3)}`,
+      detail: sf.still
+        ? `Another face stayed ${frozen ? "pixel-perfectly " : ""}still and never turned while the person did the head turn — a picture of a face: an ID card or photo held up to the camera${frozen ? ", or composited into the video" : ""}.`
+        : "Another face was visible during the head-turn challenge (someone else in view, or a picture of a face).",
+      status: sf.still ? "fail" : "warn",
+      evidence: sf.still ? { phone: -0.2 } : {},
+      cameraEvidence: frozen ? { virtual: 1.0, injected: 0.6, physical: -0.8 } : {},
+    });
+  }
+
   if (d.deviceRotationDeg !== null && (d.parallax ?? 0) >= 0.1) {
     const orbit = d.deviceRotationDeg >= ORBIT_DEG;
     add({
@@ -627,5 +689,46 @@ function depthRules(c: Ctx, add: Add) {
       status: orbit ? "warn" : "pass",
       cameraEvidence: orbit ? { physical: -0.3 } : { physical: 0.3 },
     });
+  }
+}
+
+function noiseMapRules(f: CameraCapture, add: Add) {
+  const nm = f.noiseMap;
+  if (!nm || !Array.isArray(nm.tiles) || !nm.tiles.length) return;
+  // Re-derive from the tile statistics; a client-sent verdict is ignored.
+  const tiles = nm.tiles.filter((t) => typeof t?.luma === "number" && typeof t?.texture === "number" && (t.zero === null || typeof t.zero === "number"));
+  const v = noiseVerdict(tiles, Number(nm.pairs) || 0, Number(nm.duplicatePairs) || 0);
+  const grid = `${tiles.length} regions · ${v.live} live · ${v.static} frozen`;
+  if (v.verdict === "composite") {
+    add({
+      id: "camera.noise-map",
+      title: "Sensor-noise map",
+      value: `composited · ${v.staticTextured} detailed regions frozen · ${v.live} live`,
+      detail:
+        "Parts of the picture with real detail stayed bit-identical frame after frame while the rest carried fresh sensor noise. A camera sensor adds noise to every pixel of every frame, so those regions were pasted into the feed — an ID card or photo composited over a live video (OBS scene, overlay, background replacement).",
+      status: "fail",
+      evidence: { spoofed: 0.6, phone: -0.6 },
+      cameraEvidence: { virtual: 3.0, injected: 1.5, physical: -3.0 },
+    });
+  } else if (v.verdict === "static") {
+    add({
+      id: "camera.noise-map",
+      title: "Sensor-noise map",
+      value: v.static ? `frozen · ${grid}` : `frozen · every frame bit-identical (${nm.duplicatePairs} repeats)`,
+      detail: "No region of the frame carried per-pixel sensor noise — frames were identical or changed only as a whole: a still image or a generated feed presented as a camera.",
+      status: "fail",
+      cameraEvidence: { virtual: 1.5, injected: 1.0, synthetic: 1.0, physical: -1.5 },
+    });
+  } else if (v.verdict === "sensor") {
+    add({
+      id: "camera.noise-map",
+      title: "Sensor-noise map",
+      value: `live · ${grid}`,
+      detail: "Fresh temporal noise across the whole frame, as a physical sensor produces.",
+      status: "pass",
+      cameraEvidence: { physical: 0.6, virtual: -0.3 },
+    });
+  } else {
+    add({ id: "camera.noise-map", title: "Sensor-noise map", value: `${v.verdict} · ${grid}`, detail: "Not enough usable regions to judge.", status: "info" });
   }
 }

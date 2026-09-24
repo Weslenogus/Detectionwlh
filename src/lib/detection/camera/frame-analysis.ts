@@ -8,7 +8,7 @@
  * images pushed through a virtual camera) have zero temporal noise; replayed
  * video files carry 8×8 compression blocking.
  */
-import type { FrameAggregate, FrameMetric } from "../types";
+import type { FrameAggregate, FrameMetric, NoiseMap, NoiseTile } from "../types";
 import { mean, median, pearson } from "../util/stats";
 
 export interface RawFrame {
@@ -370,4 +370,138 @@ export function frameTiming(ts: number[]): { fps: number | null; mean: number | 
   const m = mean(d);
   const s = Math.sqrt(d.reduce((acc, x) => acc + (x - m) * (x - m), 0) / Math.max(1, d.length - 1));
   return { fps: m > 0 ? Math.round((1000 / m) * 10) / 10 : null, mean: Math.round(m * 100) / 100, std: Math.round(s * 100) / 100, cv: m > 0 ? Math.round((s / m) * 1000) / 1000 : null };
+}
+
+/* ------------------------------ Noise map ---------------------------------- */
+
+/**
+ * Native-resolution tiles sampled on a grid over the whole frame. Every pixel of
+ * a real sensor carries fresh noise in every frame, so a region that stays
+ * bit-identical while the rest of the image is noisy was pasted in: an ID card
+ * or still image composited over a live feed in OBS, a frozen overlay, a
+ * background replacement. A frame where every region is frozen is a still image.
+ */
+export const NOISE_GRID = { cols: 6, rows: 4, size: 24 } as const;
+
+/** Tile origin (top-left) at the centre of grid cell (c, r), on even pixels for chroma alignment. */
+export function tileOrigin(c: number, r: number, vw: number, vh: number, grid = NOISE_GRID): { x: number; y: number } {
+  const x = Math.round(((c + 0.5) * vw) / grid.cols - grid.size / 2);
+  const y = Math.round(((r + 0.5) * vh) / grid.rows - grid.size / 2);
+  return { x: Math.max(0, Math.min(vw - grid.size, x - (x % 2))), y: Math.max(0, Math.min(vh - grid.size, y - (y % 2))) };
+}
+
+const STATIC_ZERO = 0.97;
+const LIVE_ZERO = 0.85;
+const TEXTURED = 4;
+
+/**
+ * @param frames RGBA mosaics of (cols·size) × (rows·size) px, tile (c, r) at (c·size, r·size).
+ */
+export function analyzeNoiseMap(frames: Uint8ClampedArray[], grid = NOISE_GRID): NoiseMap | null {
+  const { cols, rows, size } = grid;
+  const W = cols * size;
+  const n = cols * rows;
+  if (frames.length < 4 || frames.some((f) => f.length !== W * rows * size * 4)) return null;
+  const zeroRatios: number[][] = Array.from({ length: n }, () => []);
+  const sigmas: number[][] = Array.from({ length: n }, () => []);
+  const hist = new Int32Array(511);
+  let usedPairs = 0;
+  let duplicatePairs = 0;
+  for (let k = 1; k < frames.length; k++) {
+    const a = frames[k - 1];
+    const b = frames[k];
+    let whole = true;
+    for (let i = 0; i < a.length; i += 4) if (a[i + 1] !== b[i + 1]) { whole = false; break; }
+    // A repeated whole frame says nothing about individual regions.
+    if (whole) { duplicatePairs++; continue; }
+    usedPairs++;
+    for (let t = 0; t < n; t++) {
+      const x0 = (t % cols) * size;
+      const y0 = Math.floor(t / cols) * size;
+      let used = 0;
+      let quiet = 0;
+      let quietN = 0;
+      hist.fill(0);
+      for (let y = y0; y < y0 + size; y++) {
+        for (let x = x0; x < x0 + size; x++) {
+          const i = (y * W + x) * 4 + 1;
+          const p = a[i];
+          const q = b[i];
+          if (p <= CLIP_LO || p >= CLIP_HI || q <= CLIP_LO || q >= CLIP_HI) continue;
+          used++;
+          hist[q - p + 255]++;
+          const d = Math.abs(p - q);
+          if (d < MOTION_CUTOFF) {
+            quiet += d;
+            quietN++;
+          }
+        }
+      }
+      if (used >= size * size * 0.5) {
+        // Share of pixels that changed by exactly the tile's most common amount: 1 for a frozen
+        // region and for a uniform colour/brightness shift (a generated feed), low for real
+        // per-pixel sensor noise.
+        let mode = 0;
+        for (let k = 0; k < hist.length; k++) if (hist[k] > mode) mode = hist[k];
+        zeroRatios[t].push(mode / used);
+        sigmas[t].push(quietN ? quiet / quietN / ABS_DIFF_TO_SIGMA : 0);
+      }
+    }
+  }
+  const first = frames[0];
+  const tiles: NoiseTile[] = [];
+  for (let t = 0; t < n; t++) {
+    const c = t % cols;
+    const r = Math.floor(t / cols);
+    const ys: number[] = [];
+    for (let y = r * size; y < (r + 1) * size; y++) {
+      for (let x = c * size; x < (c + 1) * size; x++) {
+        const i = (y * W + x) * 4;
+        ys.push(0.299 * first[i] + 0.587 * first[i + 1] + 0.114 * first[i + 2]);
+      }
+    }
+    const lum = mean(ys);
+    const texture = Math.sqrt(mean(ys.map((v) => (v - lum) ** 2)));
+    const zero = zeroRatios[t].length ? median(zeroRatios[t]) : null;
+    tiles.push({
+      c,
+      r,
+      state: tileState({ zero, luma: lum }),
+      zero: zero === null ? null : Math.round(zero * 1000) / 1000,
+      sigma: sigmas[t].length ? Math.round(median(sigmas[t]) * 1000) / 1000 : null,
+      luma: Math.round(lum),
+      texture: Math.round(texture * 10) / 10,
+    });
+  }
+  return { cols, rows, size, pairs: usedPairs, duplicatePairs, tiles, ...noiseVerdict(tiles, usedPairs, duplicatePairs) };
+}
+
+/** Tile state from its statistics (re-applied server-side to client-reported tiles). */
+export function tileState(t: Pick<NoiseTile, "zero" | "luma">): NoiseTile["state"] {
+  return t.zero === null || t.luma < 12 || t.luma > 243 ? "clipped" : t.zero >= STATIC_ZERO ? "static" : t.zero < LIVE_ZERO ? "live" : "mixed";
+}
+
+export function noiseVerdict(
+  tiles: Pick<NoiseTile, "zero" | "luma" | "texture">[],
+  pairs: number,
+  duplicatePairs: number,
+): Pick<NoiseMap, "live" | "static" | "staticTextured" | "verdict"> {
+  const states = tiles.map((t) => ({ state: tileState(t), texture: t.texture }));
+  const usable = states.filter((t) => t.state !== "clipped").length;
+  const live = states.filter((t) => t.state === "live").length;
+  const staticAll = states.filter((t) => t.state === "static").length;
+  const staticTextured = states.filter((t) => t.state === "static" && t.texture >= TEXTURED).length;
+  const verdict: NoiseMap["verdict"] =
+    pairs < 3
+      ? duplicatePairs >= 3
+        ? "static"
+        : "insufficient"
+      : staticTextured >= 2 && live >= 3
+        ? "composite"
+        : live === 0 && usable && staticAll >= usable * 0.6
+          ? "static"
+          : usable && live >= usable * 0.6
+            ? "sensor"
+            : "inconclusive";
+  return { live, static: staticAll, staticTextured, verdict };
 }

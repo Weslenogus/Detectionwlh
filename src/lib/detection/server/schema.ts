@@ -114,6 +114,14 @@ const captureSchema = loose({
   timing: loose({ frames: n, captureMs: n }),
   // Only the timing of the flash schedule is used; colours and verdict are re-derived server-side.
   flash: loose({ schedule: z.array(loose({ start: n, end: n })).max(8) }).nullable().optional(),
+  // Tile statistics only; the verdict is re-derived from them server-side.
+  noiseMap: loose({
+    pairs: n,
+    duplicatePairs: n,
+    tiles: z.array(loose({ c: n, r: n, zero: nn, luma: n, texture: n })).max(64),
+  })
+    .nullable()
+    .optional(),
 }).nullable();
 
 const keyFrame = z.array(n).max(256).nullable();
@@ -128,6 +136,9 @@ const active3dSchema = loose({
   samples: z.array(z.array(n).max(256)).max(48).optional(),
   keyFrames: loose({ frontal: keyFrame, left: keyFrame, right: keyFrame }),
   gyro: z.array(z.array(n).length(4)).max(320).optional(),
+  others: z.array(z.array(n).length(5)).max(160).optional(),
+  closeUp: z.array(z.array(n).length(5)).max(32).optional(),
+  closeUpShots: n.optional(),
 })
   .nullable()
   .optional();

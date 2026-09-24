@@ -92,6 +92,26 @@ export interface Active3DSignals {
   samples?: number[][];
   /** Gyroscope during the challenge: [t, alpha, beta, gamma] rotation rate (deg/s), t on performance.now(). */
   gyro?: number[][];
+  /** Second-largest face per frame when more than one is in view: [t, cx, cy, width, nose]. */
+  others?: number[][];
+  /** Small faces found by the close-up scan of full-resolution snapshots: [t, cx, cy, width, nose]. */
+  closeUp?: number[][];
+  /** Number of snapshots the close-up scan looked at. */
+  closeUpShots?: number;
+}
+
+export interface SecondFace {
+  frames: number;
+  /** Share of tracked frames in which a second face was visible. */
+  share: number;
+  /** Its size relative to the person doing the challenge. */
+  relSize: number | null;
+  /** Median frame-to-frame movement of its centre, in its own face widths. */
+  motion: number | null;
+  /** Range of its nose offset (a printed face never turns). */
+  noseRange: number | null;
+  /** Never moved or turned while the primary face did: a photo / ID card. */
+  still: boolean;
 }
 
 export interface Active3DAnalysis {
@@ -107,6 +127,7 @@ export interface Active3DAnalysis {
   deviceRotationDeg: number | null;
   yawNoseCorr: number | null;
   durationMs: number | null;
+  secondFace: SecondFace | null;
 }
 
 type Pt = { x: number; y: number };
@@ -291,6 +312,7 @@ export function analyzeActive3d(a: Active3DSignals | null | undefined, challenge
     deviceRotationDeg: null,
     yawNoseCorr: null,
     durationMs: null,
+    secondFace: null,
   };
   if (!a || a.status === "skipped" || a.status === "unavailable" || a.status === "error") return empty;
   const aspect = typeof a.frameAspect === "number" && a.frameAspect > 0.2 && a.frameAspect < 5 ? a.frameAspect : 1;
@@ -359,6 +381,38 @@ export function analyzeActive3d(a: Active3DSignals | null | undefined, challenge
     deviceRotationDeg: rot,
     yawNoseCorr: yawNoseCorr === null ? null : Math.round(yawNoseCorr * 1000) / 1000,
     durationMs,
+    secondFace: secondFaceOf(a, track, aspect),
+  };
+}
+
+/** A face that stays still and never turns while the primary one does is a picture. */
+export function secondFaceOf(a: Active3DSignals, track: PoseFrame[], aspect = 1): SecondFace | null {
+  const valid = (xs: unknown) =>
+    (Array.isArray(xs) ? xs : []).filter(
+      (r): r is number[] => Array.isArray(r) && r.length >= 5 && r.every((v) => typeof v === "number" && Number.isFinite(v)) && r[3] > 0,
+    );
+  const full = valid(a.others);
+  const close = valid(a.closeUp);
+  const shots = typeof a.closeUpShots === "number" && a.closeUpShots > 0 ? a.closeUpShots : 0;
+  // One observation per timestamp; the whole-frame detection wins over the close-up one.
+  const seen = new Set<number>();
+  const rows = [...full, ...close].filter((r) => (seen.has(r[0]) ? false : (seen.add(r[0]), true))).sort((p, q) => p[0] - q[0]);
+  if (rows.length < 3) return null;
+  const closeShare = shots ? new Set(close.map((r) => r[0])).size / shots : 0;
+  const moves: number[] = [];
+  for (let i = 1; i < rows.length; i++) moves.push(Math.hypot((rows[i][1] - rows[i - 1][1]) * aspect, rows[i][2] - rows[i - 1][2]) / rows[i][3]);
+  const noses = rows.map((r) => r[4]);
+  const noseRange = Math.max(...noses) - Math.min(...noses);
+  const motion = median(moves);
+  const primaryW = median(track.map((f) => f.faceW).filter((w) => typeof w === "number" && w > 0));
+  const primaryRange = track.length ? Math.max(...track.map((f) => f.nose)) - Math.min(...track.map((f) => f.nose)) : 0;
+  return {
+    frames: rows.length,
+    share: Math.round(Math.min(1, Math.max(full.length / Math.max(1, track.length), closeShare)) * 100) / 100,
+    relSize: primaryW > 0 ? Math.round((median(rows.map((r) => r[3])) / primaryW) * 100) / 100 : null,
+    motion: Math.round(motion * 10000) / 10000,
+    noseRange: Math.round(noseRange * 1000) / 1000,
+    still: motion < 0.004 && noseRange < 0.05 && primaryRange >= TURN_THRESHOLD,
   };
 }
 

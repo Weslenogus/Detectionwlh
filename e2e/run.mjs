@@ -20,6 +20,10 @@ const FAKE_CAMERA = ["--use-fake-ui-for-media-stream", "--use-fake-device-for-me
 const FACE_CLIPS = process.env.FACE_CLIPS;
 const clip = (name) => [...FAKE_CAMERA, `--use-file-for-fake-video-capture=${join(FACE_CLIPS ?? "", name)}`];
 
+const hideWebdriver = () => {
+  Object.defineProperty(Navigator.prototype, "webdriver", { get: () => false });
+};
+
 const SCENARIOS = [
   {
     name: "headless-desktop",
@@ -42,9 +46,7 @@ const SCENARIOS = [
     about: "iPhone emulation with the automation flag hidden and the headless UA token removed",
     args: [...FAKE_CAMERA, "--disable-blink-features=AutomationControlled"],
     context: { ...devices["iPhone 15 Pro"] },
-    init: () => {
-      Object.defineProperty(Navigator.prototype, "webdriver", { get: () => false });
-    },
+    init: hideWebdriver,
     expect: { notDecision: "approve", notClass: "phone", flagsInclude: /Native API integrity|engine|vendor|Desktop-only|CPU/i },
   },
   {
@@ -79,6 +81,32 @@ const SCENARIOS = [
           args: clip("flat.mjpeg"),
           context: { ...devices["Pixel 7"] },
           expect: { notDecision: "approve", depth: "flat" },
+        },
+        {
+          name: "obs-still-id",
+          about: "OBS Virtual Camera renamed \"camera2 1, facing front\" + Pixel 7 emulation (webdriver hidden): still image of a face and a doctored ID card",
+          args: [...clip("id-still.mjpeg"), "--disable-blink-features=AutomationControlled"],
+          context: { ...devices["Pixel 7"] },
+          init: hideWebdriver,
+          renameCamera: "camera2 1, facing front",
+          expect: {
+            notDecision: "approve",
+            cameraNot: "physical",
+            findings: { "camera.label-driver": "fail", "camera.noise-map": /^frozen/ },
+          },
+        },
+        {
+          name: "obs-relay-id",
+          about: "Renamed OBS camera relaying a live 3D face (with sensor noise) and a doctored ID card pasted into the scene",
+          args: [...clip("id-relay.mjpeg"), "--disable-blink-features=AutomationControlled"],
+          context: { ...devices["Pixel 7"] },
+          init: hideWebdriver,
+          renameCamera: "camera2 1, facing front",
+          expect: {
+            notDecision: "approve",
+            cameraNot: "physical",
+            findings: { "camera.label-driver": "fail", "camera.noise-map": /^composited/, "camera.second-face": "fail" },
+          },
         },
         {
           name: "face-mesh-3d",
@@ -120,6 +148,20 @@ async function runScenario(browserPath, base, sc) {
   const context = await browser.newContext({ ...sc.context, permissions: ["camera", ...(sc.grant ?? [])] });
   if (sc.init) await context.addInitScript(sc.init);
   const page = await context.newPage();
+  if (sc.renameCamera) {
+    // OS-level rename (OBS / v4l2loopback card_label): the label is just a string the driver
+    // reports, so rewriting it in the submitted signals is exactly what the server would receive.
+    await page.route("**/api/analyze", (route) => {
+      const body = JSON.parse(route.request().postData() ?? "{}");
+      const cam = body.bundle?.camera;
+      const old = cam?.front?.label;
+      if (old) {
+        const swap = (v) => (typeof v === "string" && v === old ? sc.renameCamera : Array.isArray(v) ? v.map(swap) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, swap(x)])) : v);
+        body.bundle = swap(body.bundle);
+      }
+      return route.continue({ postData: JSON.stringify(body) });
+    });
+  }
   const logs = [];
   page.on("console", (m) => m.type() === "error" && logs.push(m.text()));
   page.on("pageerror", (e) => logs.push(`pageerror: ${e.message}`));
@@ -151,6 +193,12 @@ function check(sc, report) {
   if (e.notClass && report.deviceClass === e.notClass) errs.push(`device class must not be ${e.notClass}`);
   if (e.cameraNot && report.camera.cameraClass === e.cameraNot) errs.push(`camera class must not be ${e.cameraNot}`);
   if (e.flagsInclude && !report.flags.some((f) => e.flagsInclude.test(f))) errs.push(`flags should include ${e.flagsInclude}`);
+  const all = report.categories.flatMap((c) => c.findings);
+  for (const [id, want] of Object.entries(e.findings ?? {})) {
+    const f = all.find((x) => x.id === id);
+    const ok = f && (want instanceof RegExp ? want.test(f.value) : f.status === want);
+    if (!ok) errs.push(`${id} should be ${want}, got ${f ? `${f.status}: ${f.value}` : "missing"}`);
+  }
   const depth = report.camera.depth;
   if (e.depth && depth?.verdict !== e.depth) errs.push(`3D verdict should be ${e.depth}, got ${depth?.verdict}`);
   if (e.depthNot && depth?.verdict === e.depthNot) errs.push(`3D verdict must not be ${e.depthNot}`);
@@ -177,9 +225,9 @@ if (!base) {
 }
 
 let failed = 0;
-const only = process.argv[2];
+const only = process.argv[2]?.split(",");
 try {
-  for (const sc of SCENARIOS.filter((s) => !only || s.name === only)) {
+  for (const sc of SCENARIOS.filter((s) => !only || only.includes(s.name))) {
     process.stdout.write(`\n▶ ${sc.name} — ${sc.about}\n`);
     try {
       const { body, ms, logs } = await runScenario(browserPath, base, sc);
@@ -193,7 +241,9 @@ try {
       console.log(`  ${probs}`);
       console.log(`  camera=${r.camera.cameraClass} ${r.camera.confidence ? (r.camera.confidence * 100).toFixed(1) + "%" : ""} liveness=${r.camera.liveness}`);
       const d = r.camera.depth;
-      if (d) console.log(`  3D=${d.verdict} reached=${d.reached.join("→") || "—"} parallax=${d.parallax} slope=${d.depthSlope} tilt=${d.tilt}`);
+      if (d) console.log(`  3D=${d.verdict} reached=${d.reached.join("→") || "—"} parallax=${d.parallax} slope=${d.depthSlope} tilt=${d.tilt}${d.secondFace ? ` second-face=${JSON.stringify(d.secondFace)}` : ""}`);
+      for (const f of r.categories.flatMap((c) => c.findings).filter((f) => /^camera\.(label|label-driver|noise-map|second-face|depth)$/.test(f.id)))
+        console.log(`  · ${f.id} [${f.status}] ${f.value}`);
       for (const f of r.flags) console.log(`  ⚑ ${f}`);
       if (logs.length) console.log(`  console errors: ${logs.slice(0, 3).join(" | ")}`);
       const errs = check(sc, r);

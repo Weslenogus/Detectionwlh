@@ -3,7 +3,7 @@ import { attempt, errorMessage, sleep, withTimeout } from "../util/safe";
 import { isNativeMediaFn, listDevices, plainCaps, shortHash } from "./devices";
 import { detectFaces } from "./face";
 import { analyzeFlash, FLASH_COLORS } from "./flash";
-import { analyzeFrames, frameTiming, type RawFrame } from "./frame-analysis";
+import { analyzeFrames, analyzeNoiseMap, frameTiming, NOISE_GRID, tileOrigin, type RawFrame } from "./frame-analysis";
 import type { PoseDir } from "./liveness3d";
 import { runPoseChallenge, type PoseProgress } from "./pose-challenge";
 
@@ -37,6 +37,8 @@ interface WindowResult {
   dropped: number;
   rvfc: boolean;
   faceCanvases: HTMLCanvasElement[];
+  /** Noise-map tile mosaics, one per frame (front camera only). */
+  tiles: Uint8ClampedArray[];
 }
 
 type RVFCVideo = HTMLVideoElement & {
@@ -73,7 +75,7 @@ function waitFirstFrame(video: RVFCVideo, timeoutMs: number): Promise<void> {
 function captureWindow(
   video: RVFCVideo,
   ms: number,
-  opts: { sequence?: FlashColor[]; setFlash?: (c: string | null) => void; faces?: number; onProgress?: (p: number) => void },
+  opts: { sequence?: FlashColor[]; setFlash?: (c: string | null) => void; faces?: number; tiles?: boolean; onProgress?: (p: number) => void },
 ): Promise<WindowResult> {
   const vw = video.videoWidth || 640;
   const vh = video.videoHeight || 480;
@@ -89,6 +91,10 @@ function captureWindow(
   const stamps: number[] = [];
   const schedule: FlashSegment[] = [];
   const faceCanvases: HTMLCanvasElement[] = [];
+  const tiles: Uint8ClampedArray[] = [];
+  const { cols, rows, size } = NOISE_GRID;
+  const origins = Array.from({ length: cols * rows }, (_, t) => tileOrigin(t % cols, Math.floor(t / cols), vw, vh));
+  const mctx = opts.tiles && vw >= size * cols && vh >= size * rows ? canvas(cols * size, rows * size).getContext("2d", { willReadFrequently: true }) : null;
   const faceMarks = Array.from({ length: opts.faces ?? 0 }, (_, i) => (i + 0.5) / (opts.faces ?? 1));
   let dropped = 0;
   let lastPresented: number | null = null;
@@ -126,6 +132,11 @@ function captureWindow(
       th,
     });
     stamps.push(t);
+    if (mctx && tiles.length < 90) {
+      // 1:1 source → destination copies: native sensor pixels, no resampling.
+      origins.forEach((o, i) => mctx.drawImage(video, o.x, o.y, size, size, (i % cols) * size, Math.floor(i / cols) * size, size, size));
+      tiles.push(mctx.getImageData(0, 0, cols * size, rows * size).data);
+    }
     const progress = (performance.now() - start) / ms;
     if (faceMarks.length && progress >= faceMarks[0]) {
       faceMarks.shift();
@@ -143,7 +154,7 @@ function captureWindow(
       const end = performance.now();
       if (schedule.length) schedule[schedule.length - 1].end = Math.min(schedule[schedule.length - 1].end, end);
       opts.onProgress?.(1);
-      resolve({ frames, stamps, schedule, dropped, rvfc, faceCanvases });
+      resolve({ frames, stamps, schedule, dropped, rvfc, faceCanvases, tiles });
     };
     if (seq.length) flashTick();
     else {
@@ -285,6 +296,7 @@ function buildCapture(
     },
     metrics,
     aggregate,
+    noiseMap: win.tiles.length ? analyzeNoiseMap(win.tiles) : null,
     flash: sequence ? analyzeFlash(metrics, sequence, win.schedule, aggregate?.dark ?? false) : null,
     face: null,
     videoFrame: videoFrameInfo(video),
@@ -354,6 +366,7 @@ export async function runCameraTest(opts: CameraTestOptions): Promise<CameraTest
       sequence: opts.sequence,
       setFlash: opts.setFlash,
       faces: 5,
+      tiles: true,
       onProgress: (p) => phase("capturing", { progress: Math.min(1, p), facing: "front" }),
     });
     opts.setFlash(null);
